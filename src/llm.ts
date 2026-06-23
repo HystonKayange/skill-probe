@@ -42,29 +42,41 @@ async function completeViaApi(system: string, user: string, opts: CompleteOpts):
 // --- CLI backend (Claude subscription via the `claude` binary) ---
 interface ClaudeJsonResult { result?: unknown; is_error?: boolean }
 
+/** Pure interpreter of a `claude -p --output-format json` run. Treats a non-zero exit, an
+ * `is_error: true` payload, a timeout, or empty output as ERRORS — so an error string can never
+ * be mistaken for a valid generation (critical: fix would otherwise write it as a description). */
+export function interpretClaudeJson(
+  code: number | null, out: string, err: string, timedOut: boolean,
+): { text?: string; error?: string } {
+  if (timedOut) return { error: "claude CLI timed out after 120s" };
+  let parsed: ClaudeJsonResult | null = null;
+  try { parsed = JSON.parse(out) as ClaudeJsonResult; } catch { /* may be plain text */ }
+  if (code !== 0 || parsed?.is_error === true) {
+    const ctx = (parsed && typeof parsed.result === "string" ? parsed.result : "") || err || out;
+    return { error: `claude CLI error (exit ${code}): ${ctx.trim().slice(0, 200)}` };
+  }
+  let text = parsed ? (typeof parsed.result === "string" ? parsed.result : "") : out;
+  text = text.trim();
+  return text ? { text } : { error: `claude CLI returned no text (${(err || out).slice(0, 200)})` };
+}
+
 function completeViaClaudeCli(system: string, user: string, opts: CompleteOpts): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const args = ["-p", user, "--append-system-prompt", system, "--output-format", "json"];
     if (opts.model) args.push("--model", opts.model);
     // run in a neutral cwd so the project's own skills/AGENTS.md don't bias the generation
     const child = spawn("claude", args, { cwd: tmpdir(), stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "";
-    let settled = false;
-    const timer = setTimeout(() => { child.kill("SIGKILL"); }, 120_000);
+    let out = "", err = "", settled = false, timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 120_000);
     const done = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
     child.stderr.on("data", (d: Buffer) => { err += d.toString(); });
     child.on("error", (e: Error) => done(() =>
       reject(new Error(`claude CLI failed: ${e.message} — set ANTHROPIC_API_KEY or install/login 'claude'.`))));
-    child.on("close", () => done(() => {
-      let text = "";
-      try {
-        const j = JSON.parse(out) as ClaudeJsonResult;
-        if (typeof j.result === "string") text = j.result;
-      } catch { text = out; } // tolerate plain-text output
-      text = text.trim();
-      if (text) resolve(text);
-      else reject(new Error(`claude CLI returned no text (${(err || out).slice(0, 200)})`));
+    child.on("close", (code: number | null) => done(() => {
+      const r = interpretClaudeJson(code, out, err, timedOut);
+      if (r.text) resolve(r.text);
+      else reject(new Error(r.error ?? "claude CLI failed"));
     }));
   });
 }

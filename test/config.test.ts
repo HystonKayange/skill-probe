@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateConfig, parseProbability, ConfigError } from "../src/config.ts";
+import { validateConfig, parseProbability, parseIntFlag, ConfigError } from "../src/config.ts";
 import { resolve, dirname } from "node:path";
 
 const PATH = "/some/dir/skill-probe.config.json";
@@ -36,6 +36,15 @@ test("parseProbability validates --apply-threshold (review-3)", () => {
   assert.equal(parseProbability("0.95", "--apply-threshold", 0.9), 0.95);
   for (const bad of ["nope", "0", "1", "1.5", "-0.2", "NaN"]) {
     assert.throws(() => parseProbability(bad, "--apply-threshold", 0.9), ConfigError, `bad=${bad}`);
+  }
+});
+
+test("parseIntFlag validates --per-skill/--decoys (review-4)", () => {
+  assert.equal(parseIntFlag(undefined, "--per-skill", 3, 1), 3); // default
+  assert.equal(parseIntFlag("5", "--per-skill", 3, 1), 5);
+  assert.equal(parseIntFlag("0", "--decoys", 2, 0), 0);          // min 0 allowed for decoys
+  for (const bad of ["nope", "2.5", "-1", "NaN"]) {
+    assert.throws(() => parseIntFlag(bad, "--per-skill", 3, 1), ConfigError, `bad=${bad}`);
   }
 });
 

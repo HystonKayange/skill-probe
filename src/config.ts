@@ -84,6 +84,16 @@ export function parseProbability(raw: string | undefined, name: string, def: num
   return v;
 }
 
+/** Validate an integer flag (e.g. --per-skill, --decoys): must be an integer >= min if provided. */
+export function parseIntFlag(raw: string | undefined, name: string, def: number, min: number): number {
+  if (raw === undefined) return def;
+  const v = Number(raw);
+  if (!Number.isInteger(v) || v < min) {
+    throw new ConfigError([`${name} must be an integer >= ${min} (got ${JSON.stringify(raw)})`]);
+  }
+  return v;
+}
+
 /** CLI flag overrides (already string-typed from argv); numerics are coerced then validated. */
 export interface Overrides {
   runtime?: string | undefined;

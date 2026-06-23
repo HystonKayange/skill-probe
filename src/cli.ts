@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { runAudit, type ProgressEvent } from "./eval.ts";
 import { runFix } from "./fix.ts";
 import { listSkills, generateCases, genConfig } from "./gen.ts";
-import { loadConfig, parseProbability, ConfigError } from "./config.ts";
+import { loadConfig, parseProbability, parseIntFlag, ConfigError } from "./config.ts";
 import { renderTable, renderMarkdown, renderJson, renderFix } from "./report.ts";
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
@@ -74,14 +74,10 @@ async function audit(values: Record<string, unknown>): Promise<number> {
   return result.exitCode;
 }
 
-function intArg(raw: unknown, def: number, min: number): number {
-  if (raw === undefined) return def;
-  const v = Math.floor(Number(raw));
-  return Number.isFinite(v) && v >= min ? v : def;
-}
-
 async function gen(values: Record<string, unknown>): Promise<number> {
   const cwd = (values["cwd"] as string | undefined) ?? ".";
+  const perSkill = parseIntFlag(values["per-skill"] as string | undefined, "--per-skill", 3, 1);
+  const decoys = parseIntFlag(values["decoys"] as string | undefined, "--decoys", 2, 0);
   const skills = listSkills(resolve(cwd));
   if (skills.length === 0) {
     console.error(`no skills found under ${cwd}/.claude/skills/`);
@@ -89,9 +85,7 @@ async function gen(values: Record<string, unknown>): Promise<number> {
   }
   const model = values["model"] as string | undefined;
   const cases = await generateCases(skills, {
-    perSkill: intArg(values["per-skill"], 3, 1),
-    decoys: intArg(values["decoys"], 2, 0),
-    ...(model ? { model } : {}),
+    perSkill, decoys, ...(model ? { model } : {}),
   });
   console.log(renderJson(genConfig(cases)));
   console.error(`# drafted ${cases.length} cases for ${skills.length} skill(s) — REVIEW before ` +
