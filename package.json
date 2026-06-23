@@ -1,6 +1,6 @@
 {
   "name": "skill-probe",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Runtime-agnostic, co-loaded-aware auditor for AI agent skill libraries: measures which skill actually fires, with statistical confidence.",
   "type": "module",
   "bin": { "skill-probe": "dist/cli.js" },

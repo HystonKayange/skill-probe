@@ -35,8 +35,11 @@ skill names are dropped automatically. Flags: `--per-skill <n>` (default 3), `--
 (default 2), `--model <id>`.
 
 > **Always review the draft before running.** Generators lean toward obvious keyword-matches; you
-> add the messy, oblique phrasings real users type (that's where triggering actually fails). `gen`
-> needs `ANTHROPIC_API_KEY`.
+> add the messy, oblique phrasings real users type (that's where triggering actually fails).
+
+`gen` (and `fix`) use `ANTHROPIC_API_KEY` if it's set, otherwise they fall back to the logged-in
+**`claude` CLI** — so on a Claude subscription the whole tool (audit, gen, fix) works with **no API
+key at all**.
 
 ## Use
 
@@ -122,8 +125,9 @@ P(rewrite improved reliability) = 100%   Δ = +80% [36%, 99%]
 original backed up to: /path/to/SKILL.md.bak.1719000000000
 ```
 
-`fix` needs `ANTHROPIC_API_KEY` (for the rewrite). It changes descriptions on statistical evidence,
-not on "the new one looks nicer" — a rewrite that doesn't measurably help is reverted.
+`fix` does the rewrite via `ANTHROPIC_API_KEY` if set, else the logged-in `claude` CLI (subscription).
+It changes descriptions on statistical evidence, not on "the new one looks nicer" — a rewrite that
+doesn't measurably help is reverted.
 
 ## Status
 

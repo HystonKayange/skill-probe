@@ -31,7 +31,7 @@ OPTIONS
       --markdown           emit a Markdown table (paste into a PR/README)
       --no-cost            hide the cost line (e.g. when on a Claude subscription)
       --quiet              suppress the live progress line on stderr
-  gen only (needs ANTHROPIC_API_KEY):
+  gen only (uses ANTHROPIC_API_KEY if set, else the logged-in 'claude' CLI):
       --cwd <dir>          project dir containing .claude/skills/ (default: .)
       --per-skill <n>      should-fire prompts to draft per skill (default 3)
       --decoys <n>         off-topic decoy prompts to draft (default 2)
