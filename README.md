@@ -11,7 +11,7 @@ Complements static linters like `skill-audit` (security/quality) — this is **b
 
 ## Why
 
-- Skill activation is a coin flip: independent studies measured 55–87% trigger rates.
+- Skill activation is stochastic: the same prompt can produce different skill-routing outcomes.
 - A single run lies (we measured the same prompt at 0/5 one batch, 2/3 the next).
 - skill-probe runs each prompt **k times**, reports a **Wilson 95% CI**, stops early when the
   result is statistically decided, and flags **trigger-theft** (a sibling stealing a trigger).
@@ -26,7 +26,7 @@ npm i -g skill-probe      # or: npx skill-probe
 
 ```bash
 # point it at your own config (after `npm i -g skill-probe`):
-skill-probe --config my.config.json --k 15 --threshold 0.9 --json
+skill-probe --config my.config.json --k 10 --threshold 0.7 --json
 
 # or, from a clone of this repo, try the bundled example (needs `claude` installed + auth):
 skill-probe --config examples/audit.config.json
@@ -48,12 +48,15 @@ Output:
 ```
 skill-probe — runtime: claude-code  model: (runtime default)  threshold: 70%
 
-  PASS          reliability 100% [72%, 100%] k=10   expect=commit-writer
+  PASS          expect=commit-writer  | write a commit message
+        reliability 100% [72%, 100%] k=10
         outcomes: commit-writer×10
-  FAIL          reliability 20% [6%, 51%] k=10   expect=pr-describer
+  FAIL          expect=pr-describer  | write a pull request description
+        reliability 20% [6%, 51%] k=10
         outcomes: None×8, commit-writer×2
         ⚠ trigger-theft by: commit-writer
-  PASS          reliability 100% [72%, 100%] k=10   expect=(none)
+  PASS          expect=(none)  | what's the weather?
+        reliability 100% [72%, 100%] k=10
         outcomes: None×10
 
 Result: 2 pass / 1 fail / 0 inconclusive / 0 error  |  exit 1  |  cost $0.18
@@ -95,6 +98,7 @@ effect is positive — otherwise reverts. When applied, the original is snapshot
 before: 0% [0%, 49%]   after: 100% [51%, 100%]   (4 paired runs)
 P(rewrite improved reliability) = 100%   Δ = +80% [36%, 99%]
 ✅ APPLIED
+original backed up to: /path/to/SKILL.md.bak.1719000000000
 ```
 
 `fix` needs `ANTHROPIC_API_KEY` (for the rewrite). It changes descriptions on statistical evidence,
