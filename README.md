@@ -68,6 +68,11 @@ Result: 2 pass / 1 fail / 0 inconclusive / 0 error  |  exit 1  |  cost $0.18
 - Exit code: `0` all pass, `1` a behavioral fail / trigger-theft, `2` inconclusive or an
   infrastructure error (runtime down → never a silent pass).
 
+**Output options:** a live `probing [2/3] …` progress line prints to stderr while it runs (use
+`--quiet` to silence it). `--markdown` emits a table you can paste into a PR/README; `--json`
+for machine output; `--no-cost` hides the cost line (handy on a Claude subscription, where the
+dollar figure is just an estimate, not a charge).
+
 **Cross-runtime comparison must pin the model.** A skill can fire on one runtime and not another
 partly because of the *model*, not the runtime. Always set `model` (recorded in the report) so a
 Claude Code vs OpenCode comparison is fair — otherwise you're comparing two confounded variables.

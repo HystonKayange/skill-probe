@@ -22,7 +22,10 @@ export async function measure(
   adapter: RuntimeAdapter,
   prompt: string,
   expected: string | null,
-  opts: { cwd: string; maxK: number; threshold: number; conf: number; model?: string },
+  opts: {
+    cwd: string; maxK: number; threshold: number; conf: number; model?: string;
+    onProbe?: (validN: number, maxK: number) => void;
+  },
 ): Promise<RunStats> {
   const want = expected ?? "None";
   const dist: Record<string, number> = {};
@@ -37,12 +40,14 @@ export async function measure(
     if (r.status === "error") {
       errors++;
       lastError = r.error;
+      opts.onProbe?.(n, opts.maxK);
       continue; // do NOT record as a behavioral outcome
     }
     const key = r.skillFired ?? "None";
     dist[key] = (dist[key] ?? 0) + 1;
     if (key === want) hits++;
     n++;
+    opts.onProbe?.(n, opts.maxK);
     if (n >= 3) {
       const d = sequentialDecision(hits, n, opts.threshold, opts.conf);
       if (d !== "undecided") break;

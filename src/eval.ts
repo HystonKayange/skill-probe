@@ -40,15 +40,32 @@ function verdictFor(stats: RunStats, decision: CaseResult["decision"], theft: st
   return "inconclusive"; // includes "k too small to decide" — report says how many runs are needed
 }
 
-export async function runAudit(cfg: Config): Promise<AuditResult> {
+export interface ProgressEvent {
+  caseIndex: number;   // 1-based
+  caseTotal: number;
+  prompt: string;
+  validN: number;
+  maxK: number;
+}
+
+export async function runAudit(
+  cfg: Config,
+  onProgress?: (e: ProgressEvent) => void,
+): Promise<AuditResult> {
   const adapter = getAdapter(cfg.runtime);
 
   const cases: CaseResult[] = [];
   let totalCost = 0;
-  for (const c of cfg.cases) {
+  for (let ci = 0; ci < cfg.cases.length; ci++) {
+    const c = cfg.cases[ci]!;
     const stats = await measure(adapter, c.prompt, c.expected, {
       cwd: cfg.cwd, maxK: cfg.k, threshold: cfg.threshold, conf: cfg.conf,
       ...(cfg.model ? { model: cfg.model } : {}),
+      ...(onProgress ? {
+        onProbe: (validN: number, maxK: number) => onProgress({
+          caseIndex: ci + 1, caseTotal: cfg.cases.length, prompt: c.prompt, validN, maxK,
+        }),
+      } : {}),
     });
     totalCost += stats.totalCost;
     const rel = reliability(stats.hits, stats.n, cfg.conf);

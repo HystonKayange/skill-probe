@@ -18,7 +18,10 @@ function kToCertify(threshold: number, conf: number): number {
   return 500;
 }
 
-export function renderTable(a: AuditResult): string {
+export interface RenderOpts { showCost?: boolean }
+
+export function renderTable(a: AuditResult, opts: RenderOpts = {}): string {
+  const showCost = opts.showCost ?? true;
   const out: string[] = [];
   out.push(`skill-probe — runtime: ${a.runtime}  model: ${a.model}  threshold: ${pct(a.threshold)}`);
   out.push("");
@@ -44,8 +47,35 @@ export function renderTable(a: AuditResult): string {
   }
   out.push("");
   out.push(`Result: ${a.counts.pass} pass / ${a.counts.fail} fail / ` +
-    `${a.counts.inconclusive} inconclusive / ${a.counts.error} error  |  ` +
-    `exit ${a.exitCode}  |  cost $${a.totalCost.toFixed(4)}`);
+    `${a.counts.inconclusive} inconclusive / ${a.counts.error} error  |  exit ${a.exitCode}` +
+    (showCost ? `  |  cost $${a.totalCost.toFixed(4)}` : ""));
+  return out.join("\n");
+}
+
+/** Markdown table — paste into a PR or README. */
+export function renderMarkdown(a: AuditResult, opts: RenderOpts = {}): string {
+  const showCost = opts.showCost ?? true;
+  const mark: Record<Verdict, string> = {
+    pass: "✅ pass", fail: "❌ fail", inconclusive: "⚠️ inconclusive", error: "⛔ error",
+  };
+  const out: string[] = [];
+  out.push(`### skill-probe — \`${a.runtime}\` · model \`${a.model}\` · threshold ${pct(a.threshold)}`);
+  out.push("");
+  out.push("| Verdict | Skill | Reliability (95% CI) | k | Notes |");
+  out.push("|---|---|---|---|---|");
+  for (const c of a.cases) {
+    const r = c.reliability;
+    const expect = c.expected ?? "(decoy)";
+    let notes = "";
+    if (c.verdict === "error") notes = `infra error: ${c.stats.lastError ?? "untrustworthy"}`;
+    else if (c.theft.length) notes = `⚠ trigger-theft by ${c.theft.join(", ")}`;
+    else if (c.verdict === "inconclusive") notes = `need ~k=${kToCertify(a.threshold, r.conf)} to certify`;
+    const rel = c.verdict === "error" ? "—" : `${pct(r.pHat)} [${pct(r.ciLow)}, ${pct(r.ciHigh)}]`;
+    out.push(`| ${mark[c.verdict]} | \`${expect}\` | ${rel} | ${r.k} | ${notes} |`);
+  }
+  out.push("");
+  out.push(`**${a.counts.pass} pass · ${a.counts.fail} fail · ${a.counts.inconclusive} inconclusive · ` +
+    `${a.counts.error} error**` + (showCost ? ` · cost $${a.totalCost.toFixed(4)}` : ""));
   return out.join("\n");
 }
 

@@ -4,10 +4,10 @@
  *   skill-probe fix --config <f> --skill <n>  rewrite a skill's description & prove the lift
  * Exit: 0 = pass/applied, 1 = behavioral fail/reverted, 2 = inconclusive/infra error/usage. */
 import { parseArgs } from "node:util";
-import { runAudit } from "./eval.ts";
+import { runAudit, type ProgressEvent } from "./eval.ts";
 import { runFix } from "./fix.ts";
 import { loadConfig, ConfigError } from "./config.ts";
-import { renderTable, renderJson, renderFix } from "./report.ts";
+import { renderTable, renderMarkdown, renderJson, renderFix } from "./report.ts";
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
 
@@ -25,6 +25,9 @@ OPTIONS
       --threshold <p>      min acceptable reliability, strictly 0..1 (default 0.7 = smoke test)
       --conf <p>           confidence level: 0.9 | 0.95 | 0.99 (default 0.95)
       --json               emit JSON instead of a table
+      --markdown           emit a Markdown table (paste into a PR/README)
+      --no-cost            hide the cost line (e.g. when on a Claude subscription)
+      --quiet              suppress the live progress line on stderr
   fix only:
       --skill <name>       the skill whose description to rewrite (uses the config's cases for it)
       --apply-threshold <p> min P(improvement) to keep the rewrite (default 0.9)
@@ -33,14 +36,34 @@ OPTIONS
 Reliability carries a Wilson CI + sample size k. fix rewrites the description, runs an INTERLEAVED
 before/after, and applies it only if the Bayesian P(improvement) clears the apply-threshold.`;
 
+let progressLen = 0;
+function makeProgress(values: Record<string, unknown>): ((e: ProgressEvent) => void) | undefined {
+  if (values["json"] || values["quiet"] || !process.stderr.isTTY) return undefined;
+  return (e: ProgressEvent) => {
+    const p = e.prompt.length > 32 ? e.prompt.slice(0, 29) + "…" : e.prompt;
+    const line = `  probing [${e.caseIndex}/${e.caseTotal}] "${p}" — run ${e.validN}/${e.maxK}`;
+    const pad = Math.max(0, progressLen - line.length);
+    process.stderr.write("\r" + line + " ".repeat(pad));
+    progressLen = line.length;
+  };
+}
+function clearProgress(): void {
+  if (progressLen) { process.stderr.write("\r" + " ".repeat(progressLen) + "\r"); progressLen = 0; }
+}
+
 async function audit(values: Record<string, unknown>): Promise<number> {
   const cfg = loadConfig(values["config"] as string, {
     runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
     k: values["k"] as string | undefined, threshold: values["threshold"] as string | undefined,
     conf: values["conf"] as string | undefined,
   });
-  const result = await runAudit(cfg);
-  console.log(values["json"] ? renderJson(result) : renderTable(result));
+  const result = await runAudit(cfg, makeProgress(values));
+  clearProgress();
+  const showCost = !values["no-cost"];
+  const text = values["json"] ? renderJson(result)
+    : values["markdown"] ? renderMarkdown(result, { showCost })
+    : renderTable(result, { showCost });
+  console.log(text);
   return result.exitCode;
 }
 
@@ -70,6 +93,9 @@ async function main(): Promise<void> {
       skill: { type: "string" },
       "apply-threshold": { type: "string" },
       json: { type: "boolean", default: false },
+      markdown: { type: "boolean", default: false },
+      "no-cost": { type: "boolean", default: false },
+      quiet: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
   });
