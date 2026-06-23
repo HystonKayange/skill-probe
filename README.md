@@ -100,16 +100,17 @@ not on "the new one looks nicer" — a rewrite that doesn't measurably help is r
 
 ## Status
 
-Early (v0.1). **In the audit path today:** Wilson confidence intervals + sequential stopping +
+Early (v0.1). **Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping +
 four-state verdict (pass / fail / inconclusive / **error**), across two runtimes (Claude Code,
 OpenCode). Infrastructure failures (timeout / auth / crash / empty output) are reported as
-`error`, never as a behavioral pass/fail — a decoy can't falsely pass because the runtime was
-down.
+`error`, never as a behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
 
-**Implemented and unit-tested as library functions, but NOT yet wired into the audit:** Fisher's
-exact test, Bayesian Beta-Binomial before/after, Benjamini-Hochberg FDR (`src/stats.ts`). These
-power the fix-loop and multiplicity control coming in M2/M4 — see `../PLAN.md`. Don't read the
-presence of these functions as the audit using them yet.
+**Fix (`skill-probe fix`):** uses the **Bayesian Beta-Binomial** to gate description rewrites on a
+*proven* lift (interleaved before/after, applied only if P(improvement) clears the bar).
+
+**Implemented + unit-tested but NOT yet used by any command:** Fisher's exact test and
+Benjamini-Hochberg FDR (`src/stats.ts`) — reserved for cross-case multiplicity control (a planned
+enhancement). Don't read the presence of these functions as the audit using them.
 
 ## Dev
 
