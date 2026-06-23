@@ -137,7 +137,7 @@ doesn't measurably help is reverted.
 
 ## Status
 
-Early (v0.1). **Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping +
+Early (v0.4). **Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping +
 four-state verdict (pass / fail / inconclusive / **error**), across two runtimes (Claude Code,
 OpenCode). Infrastructure failures (timeout / auth / crash / empty output) are reported as
 `error`, never as a behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
