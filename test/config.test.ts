@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateConfig, ConfigError } from "../src/config.ts";
+import { validateConfig, parseProbability, ConfigError } from "../src/config.ts";
 import { resolve, dirname } from "node:path";
 
 const PATH = "/some/dir/skill-probe.config.json";
@@ -29,6 +29,14 @@ test("rejects out-of-range threshold (#2)", () => {
 test("rejects unsupported confidence (#2)", () => {
   assert.throws(() => validateConfig({ conf: 0.975, cases: okCases }, PATH), ConfigError);
   assert.doesNotThrow(() => validateConfig({ conf: 0.99, cases: okCases }, PATH));
+});
+
+test("parseProbability validates --apply-threshold (review-3)", () => {
+  assert.equal(parseProbability(undefined, "--apply-threshold", 0.9), 0.9); // default
+  assert.equal(parseProbability("0.95", "--apply-threshold", 0.9), 0.95);
+  for (const bad of ["nope", "0", "1", "1.5", "-0.2", "NaN"]) {
+    assert.throws(() => parseProbability(bad, "--apply-threshold", 0.9), ConfigError, `bad=${bad}`);
+  }
 });
 
 test("rejects empty / malformed cases", () => {

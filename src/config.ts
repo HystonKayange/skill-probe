@@ -74,6 +74,16 @@ export function validateConfig(raw: unknown, configPath: string): Config {
   };
 }
 
+/** Validate a probability-ish flag (e.g. --apply-threshold): must be a number strictly in (0,1). */
+export function parseProbability(raw: string | undefined, name: string, def: number): number {
+  if (raw === undefined) return def;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v <= 0 || v >= 1) {
+    throw new ConfigError([`${name} must be a number strictly between 0 and 1 (got ${JSON.stringify(raw)})`]);
+  }
+  return v;
+}
+
 /** CLI flag overrides (already string-typed from argv); numerics are coerced then validated. */
 export interface Overrides {
   runtime?: string | undefined;

@@ -59,9 +59,10 @@ export function renderMarkdown(a: AuditResult, opts: RenderOpts = {}): string {
     pass: "✅ pass", fail: "❌ fail", inconclusive: "⚠️ inconclusive", error: "⛔ error",
   };
   const out: string[] = [];
+  const conf = a.cases[0]?.reliability.conf ?? 0.95;
   out.push(`### skill-probe — \`${a.runtime}\` · model \`${a.model}\` · threshold ${pct(a.threshold)}`);
   out.push("");
-  out.push("| Verdict | Skill | Reliability (95% CI) | k | Notes |");
+  out.push(`| Verdict | Skill | Reliability (${pct(conf)} CI) | k | Notes |`);
   out.push("|---|---|---|---|---|");
   for (const c of a.cases) {
     const r = c.reliability;

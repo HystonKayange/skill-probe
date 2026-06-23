@@ -6,7 +6,7 @@
 import { parseArgs } from "node:util";
 import { runAudit, type ProgressEvent } from "./eval.ts";
 import { runFix } from "./fix.ts";
-import { loadConfig, ConfigError } from "./config.ts";
+import { loadConfig, parseProbability, ConfigError } from "./config.ts";
 import { renderTable, renderMarkdown, renderJson, renderFix } from "./report.ts";
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
@@ -74,7 +74,7 @@ async function fix(values: Record<string, unknown>): Promise<number> {
     runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
     k: values["k"] as string | undefined, conf: values["conf"] as string | undefined,
   });
-  const applyBar = values["apply-threshold"] ? Number(values["apply-threshold"]) : 0.9;
+  const applyBar = parseProbability(values["apply-threshold"] as string | undefined, "--apply-threshold", 0.9);
   const result = await runFix(cfg, { skill, k: cfg.k, applyBar, ...(cfg.model ? { model: cfg.model } : {}) });
   console.log(values["json"] ? renderJson(result) : renderFix(result));
   return result.applied ? 0 : 1;

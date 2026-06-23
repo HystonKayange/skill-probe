@@ -43,3 +43,10 @@ test("renderMarkdown produces a table with verdicts + CI, honors no-cost", () =>
   assert.match(md, /cost \$0\.4900/);
   assert.doesNotMatch(renderMarkdown(audit, { showCost: false }), /cost \$/);
 });
+
+test("renderMarkdown CI label reflects the actual confidence, not hardcoded 95%", () => {
+  assert.match(renderMarkdown(audit), /Reliability \(95% CI\)/);
+  const a99 = { ...audit, cases: audit.cases.map((c) => ({ ...c, reliability: { ...c.reliability, conf: 0.99 } })) };
+  assert.match(renderMarkdown(a99), /Reliability \(99% CI\)/);
+  assert.doesNotMatch(renderMarkdown(a99), /95% CI/);
+});
