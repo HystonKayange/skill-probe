@@ -12,7 +12,11 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "keywords": ["agent-skills", "skill", "eval", "claude-code", "mcp", "SKILL.md", "trigger"],
+  "author": "HystonKayange",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/HystonKayange/skill-probe.git" },
+  "homepage": "https://github.com/HystonKayange/skill-probe#readme",
+  "bugs": { "url": "https://github.com/HystonKayange/skill-probe/issues" },
   "engines": { "node": ">=22.18" },
   "devDependencies": { "typescript": "^5.5.0", "@types/node": "^22.0.0" },
   "files": ["dist", "README.md"]
