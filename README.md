@@ -22,6 +22,22 @@ Complements static linters like `skill-audit` (security/quality) — this is **b
 npm i -g skill-probe      # or: npx skill-probe
 ```
 
+## Generate a config (`skill-probe gen`)
+
+Don't want to hand-write the cases? Draft them from your skills, then review:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...  skill-probe gen --cwd . > probe.config.json
+```
+It reads each `.claude/skills/*/SKILL.md`, and an LLM drafts realistic should-fire prompts per
+skill, cross-skill **near-misses** (to surface mis-routing), and off-topic **decoys**. Hallucinated
+skill names are dropped automatically. Flags: `--per-skill <n>` (default 3), `--decoys <n>`
+(default 2), `--model <id>`.
+
+> **Always review the draft before running.** Generators lean toward obvious keyword-matches; you
+> add the messy, oblique phrasings real users type (that's where triggering actually fails). `gen`
+> needs `ANTHROPIC_API_KEY`.
+
 ## Use
 
 ```bash

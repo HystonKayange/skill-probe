@@ -4,8 +4,10 @@
  *   skill-probe fix --config <f> --skill <n>  rewrite a skill's description & prove the lift
  * Exit: 0 = pass/applied, 1 = behavioral fail/reverted, 2 = inconclusive/infra error/usage. */
 import { parseArgs } from "node:util";
+import { resolve } from "node:path";
 import { runAudit, type ProgressEvent } from "./eval.ts";
 import { runFix } from "./fix.ts";
+import { listSkills, generateCases, genConfig } from "./gen.ts";
 import { loadConfig, parseProbability, ConfigError } from "./config.ts";
 import { renderTable, renderMarkdown, renderJson, renderFix } from "./report.ts";
 
@@ -13,6 +15,7 @@ const HELP = `skill-probe — audit a co-loaded agent skill library by real acti
 
 USAGE
   skill-probe --config <file.json> [options]                 # audit
+  skill-probe gen [--cwd <dir>] > probe.config.json          # draft a test config from your skills
   skill-probe fix --config <file.json> --skill <name> [opts] # rewrite a description, prove the lift
 
 OPTIONS
@@ -28,6 +31,10 @@ OPTIONS
       --markdown           emit a Markdown table (paste into a PR/README)
       --no-cost            hide the cost line (e.g. when on a Claude subscription)
       --quiet              suppress the live progress line on stderr
+  gen only (needs ANTHROPIC_API_KEY):
+      --cwd <dir>          project dir containing .claude/skills/ (default: .)
+      --per-skill <n>      should-fire prompts to draft per skill (default 3)
+      --decoys <n>         off-topic decoy prompts to draft (default 2)
   fix only:
       --skill <name>       the skill whose description to rewrite (uses the config's cases for it)
       --apply-threshold <p> min P(improvement) to keep the rewrite (default 0.9)
@@ -67,6 +74,31 @@ async function audit(values: Record<string, unknown>): Promise<number> {
   return result.exitCode;
 }
 
+function intArg(raw: unknown, def: number, min: number): number {
+  if (raw === undefined) return def;
+  const v = Math.floor(Number(raw));
+  return Number.isFinite(v) && v >= min ? v : def;
+}
+
+async function gen(values: Record<string, unknown>): Promise<number> {
+  const cwd = (values["cwd"] as string | undefined) ?? ".";
+  const skills = listSkills(resolve(cwd));
+  if (skills.length === 0) {
+    console.error(`no skills found under ${cwd}/.claude/skills/`);
+    return 2;
+  }
+  const model = values["model"] as string | undefined;
+  const cases = await generateCases(skills, {
+    perSkill: intArg(values["per-skill"], 3, 1),
+    decoys: intArg(values["decoys"], 2, 0),
+    ...(model ? { model } : {}),
+  });
+  console.log(renderJson(genConfig(cases)));
+  console.error(`# drafted ${cases.length} cases for ${skills.length} skill(s) — REVIEW before ` +
+    `running (add the messy/oblique phrasings the generator misses).`);
+  return 0;
+}
+
 async function fix(values: Record<string, unknown>): Promise<number> {
   const skill = values["skill"] as string | undefined;
   if (!skill) { console.error("fix requires --skill <name>"); return 2; }
@@ -92,6 +124,9 @@ async function main(): Promise<void> {
       conf: { type: "string" },
       skill: { type: "string" },
       "apply-threshold": { type: "string" },
+      cwd: { type: "string" },
+      "per-skill": { type: "string" },
+      decoys: { type: "string" },
       json: { type: "boolean", default: false },
       markdown: { type: "boolean", default: false },
       "no-cost": { type: "boolean", default: false },
@@ -99,12 +134,18 @@ async function main(): Promise<void> {
       help: { type: "boolean", short: "h", default: false },
     },
   });
-  if (values.help || !values.config) {
+  if (values.help) {
     console.log(HELP);
-    process.exit(values.help ? 0 : 2);
+    process.exit(0);
   }
   const cmd = positionals[0];
-  const code = cmd === "fix" ? await fix(values) : await audit(values);
+  let code: number;
+  if (cmd === "gen") {
+    code = await gen(values);
+  } else {
+    if (!values.config) { console.log(HELP); process.exit(2); }
+    code = cmd === "fix" ? await fix(values) : await audit(values);
+  }
   process.exit(code);
 }
 
