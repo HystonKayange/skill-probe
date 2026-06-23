@@ -25,10 +25,11 @@ npm i -g skill-probe      # or: npx skill-probe
 ## Use
 
 ```bash
-# try it on the bundled example (needs `claude` installed + auth):
-skill-probe --config examples/audit.config.json
-
+# point it at your own config (after `npm i -g skill-probe`):
 skill-probe --config my.config.json --k 15 --threshold 0.9 --json
+
+# or, from a clone of this repo, try the bundled example (needs `claude` installed + auth):
+skill-probe --config examples/audit.config.json
 ```
 
 Config (`skill-probe.config.json`):
@@ -87,7 +88,8 @@ It (1) LLM-rewrites the description, told the sibling skills so it won't steal t
 (2) runs an **interleaved** before/after (old desc → probe → new desc → probe, paired, to control
 for drift); (3) computes the **Bayesian** P(improvement) + a credible interval on the change; and
 (4) **applies the rewrite only if** `P(improvement) ≥ --apply-threshold` (default 0.9) **and** the
-effect is positive — otherwise reverts. The original is always backed up to `SKILL.md.bak`.
+effect is positive — otherwise reverts. When applied, the original is snapshotted to a timestamped
+`SKILL.md.bak.<timestamp>` (no backup is left behind on a revert).
 
 ```
 before: 0% [0%, 49%]   after: 100% [51%, 100%]   (4 paired runs)
