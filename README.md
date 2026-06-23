@@ -9,6 +9,12 @@ which skill *actually* fires (by real activation, not keyword matching) when you
 
 Complements static linters like `skill-audit` (security/quality) — this is **behavioral**.
 
+> **How it works / requirements.** skill-probe is a **terminal CLI**, *not* an in-agent slash
+> command. It drives your local runtime CLI under the hood, so you need that runtime installed and
+> authenticated: **`claude`** (logged in) for `runtime: claude-code`, or **`opencode`** for
+> `runtime: opencode`. `gen`/`fix` use `ANTHROPIC_API_KEY` if set, otherwise the local `claude` CLI.
+> Codex/Gemini runtimes aren't supported yet (their traces don't expose which skill fired).
+
 ## Why
 
 - Skill activation is stochastic: the same prompt can produce different skill-routing outcomes.
