@@ -1,0 +1,19 @@
+{
+  "name": "skill-probe",
+  "version": "0.1.0",
+  "description": "Runtime-agnostic, co-loaded-aware auditor for AI agent skill libraries: measures which skill actually fires, with statistical confidence.",
+  "type": "module",
+  "bin": { "skill-probe": "dist/cli.js" },
+  "scripts": {
+    "dev": "node src/cli.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": ["agent-skills", "skill", "eval", "claude-code", "mcp", "SKILL.md", "trigger"],
+  "license": "MIT",
+  "engines": { "node": ">=22.18" },
+  "devDependencies": { "typescript": "^5.5.0", "@types/node": "^22.0.0" },
+  "files": ["dist", "README.md"]
+}

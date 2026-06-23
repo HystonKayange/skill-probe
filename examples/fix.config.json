@@ -1,0 +1,9 @@
+{
+  "runtime": "claude-code",
+  "cwd": "./sample-skills",
+  "k": 4,
+  "threshold": 0.7,
+  "cases": [
+    { "prompt": "write a git commit message for my staged changes", "expected": "commit-writer" }
+  ]
+}

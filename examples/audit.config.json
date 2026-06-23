@@ -1,0 +1,14 @@
+{
+  "runtime": "claude-code",
+  "cwd": "./sample-skills",
+  "k": 10,
+  "threshold": 0.7,
+  "conf": 0.95,
+  "cases": [
+    { "prompt": "write a git commit message for my staged changes", "expected": "commit-writer" },
+    { "prompt": "commit my changes with a clear message", "expected": "commit-writer" },
+    { "prompt": "write a pull request description summarizing my commits", "expected": "pr-describer" },
+    { "prompt": "draft a PR description for this branch", "expected": "pr-describer" },
+    { "prompt": "what is the capital of France?", "expected": null }
+  ]
+}
