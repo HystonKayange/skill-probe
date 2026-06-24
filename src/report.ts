@@ -97,6 +97,15 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
   const ci = (r: { pHat: number; ciLow: number; ciHigh: number; k: number }) =>
     `${pct(r.pHat)} [${pct(r.ciLow)}, ${pct(r.ciHigh)}] k=${r.k}`;
   for (const c of a.cases) {
+    if (c.untrustworthy) {
+      out.push(`  [⛔ ERROR]  ${c.expected}  | ${c.prompt}`);
+      out.push(`        infrastructure errors dominated — comparison NOT trustworthy ` +
+        `(isolation ${c.isolation.stats.errors} err/${c.isolation.stats.n} valid, ` +
+        `co-loaded ${c.coLoaded.stats.errors} err/${c.coLoaded.stats.n} valid)`);
+      const reason = c.isolation.stats.lastError ?? c.coLoaded.stats.lastError;
+      if (reason) out.push(`        reason: ${reason}`);
+      continue;
+    }
     const flag = c.interference ? "⚠ INTERFERENCE" : "ok";
     out.push(`  [${flag}]  ${c.expected}  | ${c.prompt}`);
     out.push(`        isolation ${ci(c.isolation.rel)}`);
@@ -111,11 +120,13 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
   }
   if (a.skipped.length) {
     out.push("");
-    out.push(`  skipped ${a.skipped.length} case(s) with no isolable skill (decoy / unknown skill).`);
+    out.push(`  skipped ${a.skipped.length} decoy case(s) — no single skill to isolate.`);
   }
   out.push("");
-  const n = a.cases.filter((c) => c.interference).length;
-  out.push(`Result: ${n} interference / ${a.cases.length} measured  |  exit ${a.exitCode}` +
+  const interfN = a.cases.filter((c) => c.interference).length;
+  const errN = a.cases.filter((c) => c.untrustworthy).length;
+  out.push(`Result: ${interfN} interference / ${a.cases.length} measured` +
+    (errN ? ` / ${errN} error` : "") + `  |  exit ${a.exitCode}` +
     (showCost ? `  |  cost $${a.totalCost.toFixed(4)}` : ""));
   return out.join("\n");
 }

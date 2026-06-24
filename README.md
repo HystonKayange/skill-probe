@@ -136,8 +136,10 @@ Result: 1 interference / 3 measured  |  exit 1
 ```
 
 This is the "fires in isolation, fails under load X" case the aggregate rate hides. Decoy cases
-(`expected: null`) are skipped — there's no single skill to isolate. Exit `1` if any skill shows
-interference, else `0`.
+(`expected: null`) are skipped — there's no single skill to isolate; an `expected` skill that isn't
+in the library is a config error (typo), surfaced before any probes run. Exit `1` if any skill
+shows interference, `2` if a case is untrustworthy (infra errors dominated — never a silent pass),
+else `0`.
 
 ## Fix a failing skill (`skill-probe fix`)
 

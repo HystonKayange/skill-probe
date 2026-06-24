@@ -11,6 +11,14 @@ import { reliability, fisherExact2x2 } from "./stats.ts";
 import { measure, type RunStats } from "./orchestrator.ts";
 import { getAdapter } from "./adapters/index.ts";
 import { listSkills } from "./gen.ts";
+import { ConfigError } from "./config.ts";
+
+/** Same rule the audit uses (eval.ts): a measurement is untrustworthy when infrastructure
+ * failures dominate — no valid probes, or errors at least equal the valid count. Such a
+ * condition must NOT be read as a behavioral result (a runtime outage is not a clean pass). */
+function infraUntrustworthy(s: RunStats): boolean {
+  return s.n === 0 || (s.errors > 0 && s.errors >= s.n);
+}
 
 /** Build a throwaway project dir whose .claude/skills/ holds ONLY the named skills (copied from
  * srcCwd). Returns its path plus a cleanup(). The probe runs against this dir to load a subset. */
@@ -39,6 +47,8 @@ export interface ContextCaseResult {
   coLoaded: Condition;         // the whole library loaded (the real condition the audit uses)
   deltaP: number;              // coLoaded.pHat - isolation.pHat (negative = suppressed under load)
   fisherP: number;             // p that the isolation-vs-co-loaded difference is real
+  /** infra failures dominated one side — the comparison is not trustworthy (NOT a behavioral result) */
+  untrustworthy: boolean;
   /** fires reliably alone but drops significantly when the full library is co-loaded */
   interference: boolean;
 }
@@ -50,10 +60,10 @@ export interface ContextAuditResult {
   conf: number;
   librarySize: number;         // skills present in the full (co-loaded) library
   cases: ContextCaseResult[];
-  skipped: string[];           // prompts skipped (null expected)
+  skipped: string[];           // decoy prompts skipped (null expected — nothing to isolate)
   totalCost: number;
-  /** 0 = no interference detected; 1 = at least one skill is suppressed under load */
-  exitCode: 0 | 1;
+  /** 0 = no interference; 1 = a skill is suppressed under load; 2 = an untrustworthy (infra) case */
+  exitCode: 0 | 1 | 2;
 }
 
 export interface ContextProgress {
@@ -73,10 +83,20 @@ export async function runContextAudit(
   const skipped: string[] = [];
   let totalCost = 0;
 
-  // only cases with a concrete expected skill that actually exists can be isolated
-  const eligible = cfg.cases.filter((c) => c.expected !== null && present.has(c.expected));
+  // decoys (null expected) have nothing to isolate → skipped. An expected skill that ISN'T in the
+  // library is almost always a config typo: fail loud BEFORE spending probes, never silently skip.
+  const eligible: typeof cfg.cases = [];
+  const unknown: string[] = [];
   for (const c of cfg.cases) {
-    if (c.expected === null || !present.has(c.expected)) skipped.push(c.prompt);
+    if (c.expected === null) skipped.push(c.prompt);
+    else if (!present.has(c.expected)) unknown.push(c.expected);
+    else eligible.push(c);
+  }
+  if (unknown.length) {
+    throw new ConfigError([
+      `expected skill(s) not in ${cfg.cwd}/.claude/skills/: ${[...new Set(unknown)].join(", ")} ` +
+      `(typo?). Available: ${library.map((s) => s.name).join(", ") || "(none)"}.`,
+    ]);
   }
 
   const common = { maxK: cfg.k, threshold: cfg.threshold, conf: cfg.conf, ...(cfg.model ? { model: cfg.model } : {}) };
@@ -110,8 +130,11 @@ export async function runContextAudit(
       ? fisherExact2x2(iso.hits, iso.n - iso.hits, co.hits, co.n - co.hits)
       : 1;
     const deltaP = coRel.pHat - isoRel.pHat;
+    // if infra failures dominated either side, the comparison isn't a behavioral result at all —
+    // it must never read as "no interference / pass" just because fisherP defaulted to 1.
+    const untrustworthy = infraUntrustworthy(iso) || infraUntrustworthy(co);
     const interference =
-      iso.n > 0 && co.n > 0 &&
+      !untrustworthy &&
       isoRel.pHat >= cfg.threshold &&  // fires reliably alone
       deltaP < 0 &&                    // and drops when co-loaded
       fisherP < 0.05;                  // and the drop is statistically real
@@ -120,14 +143,20 @@ export async function runContextAudit(
       prompt: c.prompt, expected,
       isolation: { stats: iso, rel: isoRel },
       coLoaded: { stats: co, rel: coRel },
-      deltaP, fisherP, interference,
+      deltaP, fisherP, untrustworthy, interference,
     });
   }
+
+  // precedence mirrors the audit: a real behavioral signal (interference, exit 1) outranks an
+  // untrustworthy/infra case (exit 2), which outranks a clean run (exit 0).
+  const exitCode: 0 | 1 | 2 =
+    measured.some((m) => m.interference) ? 1
+    : measured.some((m) => m.untrustworthy) ? 2
+    : 0;
 
   return {
     runtime: cfg.runtime, model: cfg.model ?? "(runtime default)",
     threshold: cfg.threshold, conf: cfg.conf, librarySize: library.length,
-    cases: measured, skipped, totalCost,
-    exitCode: measured.some((m) => m.interference) ? 1 : 0,
+    cases: measured, skipped, totalCost, exitCode,
   };
 }
