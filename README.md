@@ -108,6 +108,19 @@ Claude Code vs OpenCode comparison is fair — otherwise you're comparing two co
   case is inconclusive the report prints the exact k for your threshold. Don't set `threshold
   0.9, k 10` and expect a pass — that's statistically impossible and the tool will say so.
 
+## CI usage
+
+skill-probe exits non-zero on a real problem, so it drops straight into a pipeline:
+
+```yaml
+# .github/workflows/skills.yml  (the claude/opencode CLI must be installed + authed on the runner)
+- run: npx skill-probe --config probe.config.json --quiet --no-cost
+```
+
+Exit codes: **`0`** all pass · **`1`** a behavioral fail / trigger-theft / interference · **`2`**
+inconclusive or an infrastructure error — so a runtime outage *fails* the build instead of silently
+passing. Add `--json` to archive the full result as a build artifact.
+
 ## Activation rate by context (`skill-probe context`)
 
 The audit measures every skill **co-loaded** — the real, hard condition. But a skill can fire
