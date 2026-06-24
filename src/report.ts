@@ -4,6 +4,7 @@ import { wilsonInterval } from "./stats.ts";
 import type { AuditResult, Verdict } from "./eval.ts";
 import type { FixResult } from "./fix.ts";
 import type { ContextAuditResult } from "./context.ts";
+import type { DoctorResult } from "./doctor.ts";
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const pval = (p: number) => (p < 0.001 ? "<0.001" : p.toFixed(3));
@@ -13,7 +14,7 @@ const LABEL: Record<Verdict, string> = {
 };
 
 /** Smallest k at which an all-success run could certify reliability >= threshold. */
-function kToCertify(threshold: number, conf: number): number {
+export function kToCertify(threshold: number, conf: number): number {
   for (let k = 1; k <= 500; k++) {
     if (wilsonInterval(k, k, conf).lo > threshold) return k;
   }
@@ -84,6 +85,18 @@ export function renderMarkdown(a: AuditResult, opts: RenderOpts = {}): string {
 
 export function renderJson(a: AuditResult | unknown): string {
   return JSON.stringify(a, null, 2);
+}
+
+export function renderDoctor(d: DoctorResult): string {
+  const out: string[] = ["skill-probe doctor", ""];
+  for (const c of d.checks) out.push(`${c.status.toUpperCase().padEnd(4)}  ${c.message}`);
+  out.push("");
+  const f = d.checks.filter((c) => c.status === "fail").length;
+  const w = d.checks.filter((c) => c.status === "warn").length;
+  out.push(f ? `${f} failure(s)` + (w ? `, ${w} warning(s)` : "") + `  |  exit ${d.exitCode}`
+    : w ? `${w} warning(s)  |  exit ${d.exitCode}`
+    : `all healthy  |  exit 0`);
+  return out.join("\n");
 }
 
 /** activation-rate-by-context: isolation vs co-loaded, with a Fisher's-exact p on the drop. */

@@ -8,15 +8,17 @@ import { resolve } from "node:path";
 import { runAudit, type ProgressEvent } from "./eval.ts";
 import { runFix } from "./fix.ts";
 import { runContextAudit, type ContextProgress } from "./context.ts";
+import { runDoctor } from "./doctor.ts";
 import { listSkills, generateCases, genConfig } from "./gen.ts";
 import { loadConfig, parseProbability, parseIntFlag, ConfigError } from "./config.ts";
-import { renderTable, renderMarkdown, renderJson, renderFix, renderContext } from "./report.ts";
+import { renderTable, renderMarkdown, renderJson, renderFix, renderContext, renderDoctor } from "./report.ts";
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
 
 USAGE
   skill-probe --config <file.json> [options]                 # audit
   skill-probe context --config <file.json> [options]         # isolation vs co-loaded activation rates
+  skill-probe doctor [--cwd <dir>] [--config <file.json>]    # preflight: setup/auth/config sanity
   skill-probe gen [--cwd <dir>] > probe.config.json          # draft a test config from your skills
   skill-probe fix --config <file.json> --skill <name> [opts] # rewrite a description, prove the lift
 
@@ -33,6 +35,10 @@ OPTIONS
       --markdown           emit a Markdown table (paste into a PR/README)
       --no-cost            hide the cost line (e.g. when on a Claude subscription)
       --quiet              suppress the live progress line on stderr
+  doctor only:
+      --cwd <dir>          project dir containing .claude/skills/ (default: .)
+      --config <file>      also sanity-check a config (expected skills exist, k/threshold feasible)
+      --skip-probe         don't run the harmless live probe (skip the auth check; no cost)
   gen only (uses ANTHROPIC_API_KEY if set, else the logged-in 'claude' CLI):
       --cwd <dir>          project dir containing .claude/skills/ (default: .)
       --per-skill <n>      should-fire prompts to draft per skill (default 3)
@@ -84,6 +90,18 @@ async function audit(values: Record<string, unknown>): Promise<number> {
     : values["markdown"] ? renderMarkdown(result, { showCost })
     : renderTable(result, { showCost });
   console.log(text);
+  return result.exitCode;
+}
+
+async function doctor(values: Record<string, unknown>): Promise<number> {
+  const result = await runDoctor({
+    cwd: (values["cwd"] as string | undefined) ?? ".",
+    ...(values["config"] ? { configPath: values["config"] as string } : {}),
+    ...(values["runtime"] ? { runtime: values["runtime"] as string } : {}),
+    ...(values["model"] ? { model: values["model"] as string } : {}),
+    ...(values["skip-probe"] ? { skipProbe: true } : {}),
+  });
+  console.log(values["json"] ? renderJson(result) : renderDoctor(result));
   return result.exitCode;
 }
 
@@ -147,6 +165,7 @@ async function main(): Promise<void> {
       cwd: { type: "string" },
       "per-skill": { type: "string" },
       decoys: { type: "string" },
+      "skip-probe": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       markdown: { type: "boolean", default: false },
       "no-cost": { type: "boolean", default: false },
@@ -162,6 +181,8 @@ async function main(): Promise<void> {
   let code: number;
   if (cmd === "gen") {
     code = await gen(values);
+  } else if (cmd === "doctor") {
+    code = await doctor(values); // config is optional for doctor
   } else {
     if (!values.config) { console.log(HELP); process.exit(2); }
     code = cmd === "fix" ? await fix(values)

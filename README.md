@@ -28,6 +28,35 @@ Complements static linters like `skill-audit` (security/quality) — this is **b
 npm i -g skill-probe      # or: npx skill-probe
 ```
 
+## Start here (`skill-probe doctor`)
+
+Run this first — it catches the setup problems (no skills dir, runtime not installed or not
+authenticated, a config typo) before you spend any probes:
+
+```bash
+skill-probe doctor --cwd .                      # check the project + runtime
+skill-probe doctor --config probe.config.json   # also sanity-check a config
+```
+
+```
+skill-probe doctor
+
+PASS  Node 22.18.0
+PASS  config parsed: probe.config.json
+PASS  found .claude/skills/ with 4 skills
+PASS  expected skills all exist
+PASS  claude CLI found
+PASS  claude-code probe succeeded (CLI is authenticated)
+WARN  threshold 90% with k=10 cannot certify a pass — need ~k=35
+FAIL  skill "greeter" missing description:
+```
+
+It checks: Node version, `.claude/skills/` exists, every skill has a `SKILL.md` with `name:` +
+`description:`, names match folders, the config parses, every `expected` skill exists, the
+threshold/k are statistically achievable, the runtime CLI is installed, and a harmless live probe
+authenticates. Exit `0` healthy · `1` warnings only · `2` hard failures. Use `--skip-probe` to skip
+the live (costing) auth check.
+
 ## Generate a config (`skill-probe gen`)
 
 Don't want to hand-write the cases? Draft them from your skills, then review:
