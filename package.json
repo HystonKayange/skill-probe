@@ -1,9 +1,11 @@
 {
   "name": "skill-probe",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Runtime-agnostic, co-loaded-aware auditor for AI agent skill libraries: measures which skill actually fires, with statistical confidence.",
   "type": "module",
-  "bin": { "skill-probe": "dist/cli.js" },
+  "bin": {
+    "skill-probe": "dist/cli.js"
+  },
   "scripts": {
     "dev": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
@@ -11,13 +13,36 @@
     "build": "tsc",
     "prepublishOnly": "npm run build && npm test"
   },
-  "keywords": ["agent-skills", "skill", "eval", "claude-code", "mcp", "SKILL.md", "trigger"],
+  "keywords": [
+    "agent-skills",
+    "skill",
+    "eval",
+    "claude-code",
+    "mcp",
+    "SKILL.md",
+    "trigger"
+  ],
   "author": "HystonKayange",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/HystonKayange/skill-probe.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HystonKayange/skill-probe.git"
+  },
   "homepage": "https://github.com/HystonKayange/skill-probe#readme",
-  "bugs": { "url": "https://github.com/HystonKayange/skill-probe/issues" },
-  "engines": { "node": ">=22.18" },
-  "devDependencies": { "typescript": "^5.5.0", "@types/node": "^22.0.0" },
-  "files": ["dist", "examples", "README.md", "LICENSE"]
+  "bugs": {
+    "url": "https://github.com/HystonKayange/skill-probe/issues"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ]
 }
