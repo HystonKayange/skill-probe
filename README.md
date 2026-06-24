@@ -4,6 +4,10 @@ Runtime-agnostic, **co-loaded-aware** auditor for an AI agent's skill library. I
 which skill *actually* fires (by real activation, not keyword matching) when your whole
 `SKILL.md` library is loaded together — with **statistical confidence**, not single-shot guesses.
 
+![Terminal demo: greeter fires 100% in isolation but only 30% co-loaded — trigger-theft by welcomer, caught with Fisher's exact test](assets/skill-probe-context-demo.gif)
+
+> **Your skill works alone. Does it still work when the whole library is loaded?**
+
 > Most skill tooling tests one skill, in isolation, once. Skills only conflict when loaded
 > *together*, and activation is *stochastic*. skill-probe is the tool that tests the real thing.
 
