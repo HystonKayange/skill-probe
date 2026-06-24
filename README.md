@@ -183,6 +183,47 @@ in the library is a config error (typo), surfaced before any probes run. Exit `1
 shows interference, `2` if a case is untrustworthy (infra errors dominated — never a silent pass),
 else `0`.
 
+## Why a skill fails (`skill-probe diagnose`)
+
+When a skill doesn't fire, there are two very different root causes — and the activation rate alone
+can't tell them apart:
+
+- **Description problem** — the model doesn't even recognise the skill applies. Remedy: rewrite the
+  description (`skill-probe fix`).
+- **Routing miss** — the model *does* know the right skill, but a sibling wins at activation time.
+  Remedy: deconflict the sibling / use `context`. Rewriting *this* skill's description won't help.
+
+`diagnose` separates them by measuring **actual** activation (the real runtime probe) against
+**intended** routing — a *forced choice* where the model is shown the skill descriptions and asked
+which one should handle the request, with no auto-execution:
+
+```bash
+skill-probe diagnose --config probe.config.json
+```
+```
+  [🔀 ROUTING-MISS]  greeter  | write a greeting for my new teammate
+        actual   fires 20% [6%, 51%] k=10  (welcomer×8, greeter×2)
+        intended picks 100% [72%, 100%] k=10  (greeter×10)
+        → the model picks "greeter" when asked, but "welcomer" wins at activation. Remedy:
+          deconflict the sibling or inspect with `skill-probe context`. Rewriting "greeter" won't help.
+
+  [✍ DESCRIPTION-PROBLEM]  greeter  | say something nice to the new hire
+        actual   fires 0% [0%, 28%] k=10  (welcomer×10)
+        intended picks 10% [2%, 40%] k=10  (welcomer×9, greeter×1)
+        → the model doesn't recognise "greeter" applies. Remedy: `skill-probe fix --skill greeter`.
+```
+
+> **`intended` is a proxy, not the runtime's router.** The forced choice asks a *fresh* model which
+> skill fits, given only the descriptions — it can disagree with how the runtime actually routes
+> (we've seen `actual` route a skill 100% while `intended` picked a sibling). So treat the
+> routing-miss vs description-problem split as a strong **heuristic**, not ground truth. A useful
+> side effect: when a skill routes fine but `intended` is low, the description reads *ambiguously in
+> isolation* — a leading indicator that activation may be fragile across models or contexts, which
+> `diagnose` calls out on the `routes-ok` line.
+
+Decoys are skipped; a typo'd `expected` skill is a config error. Exit `1` if any case is a
+routing-miss or description-problem, `2` if inconclusive/untrustworthy, else `0`.
+
 ## Fix a failing skill (`skill-probe fix`)
 
 Rewrite a skill's trigger description and **prove the lift is real** before keeping it:

@@ -8,17 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./types.ts";
 import { reliability, fisherExact2x2 } from "./stats.ts";
-import { measure, type RunStats } from "./orchestrator.ts";
+import { measure, infraUntrustworthy, type RunStats } from "./orchestrator.ts";
 import { getAdapter } from "./adapters/index.ts";
 import { listSkills } from "./gen.ts";
 import { ConfigError } from "./config.ts";
-
-/** Same rule the audit uses (eval.ts): a measurement is untrustworthy when infrastructure
- * failures dominate — no valid probes, or errors at least equal the valid count. Such a
- * condition must NOT be read as a behavioral result (a runtime outage is not a clean pass). */
-function infraUntrustworthy(s: RunStats): boolean {
-  return s.n === 0 || (s.errors > 0 && s.errors >= s.n);
-}
 
 /** Build a throwaway project dir whose .claude/skills/ holds ONLY the named skills (copied from
  * srcCwd). Returns its path plus a cleanup(). The probe runs against this dir to load a subset. */

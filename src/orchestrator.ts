@@ -18,6 +18,13 @@ export interface RunStats {
   totalCost: number;
 }
 
+/** A measurement is untrustworthy when infrastructure failures dominate — no valid probes, or
+ * errors at least equal the valid count. Such a run must NOT read as a behavioral result (a runtime
+ * outage is not a clean pass). Shared by the audit, context, and diagnose paths. */
+export function infraUntrustworthy(s: RunStats): boolean {
+  return s.n === 0 || (s.errors > 0 && s.errors >= s.n);
+}
+
 export async function measure(
   adapter: RuntimeAdapter,
   prompt: string,

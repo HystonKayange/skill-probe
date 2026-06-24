@@ -8,16 +8,18 @@ import { resolve } from "node:path";
 import { runAudit, type ProgressEvent } from "./eval.ts";
 import { runFix } from "./fix.ts";
 import { runContextAudit, type ContextProgress } from "./context.ts";
+import { runDiagnose, type DiagProgress } from "./diagnose.ts";
 import { runDoctor } from "./doctor.ts";
 import { listSkills, generateCases, genConfig } from "./gen.ts";
 import { loadConfig, parseProbability, parseIntFlag, ConfigError } from "./config.ts";
-import { renderTable, renderMarkdown, renderJson, renderFix, renderContext, renderDoctor } from "./report.ts";
+import { renderTable, renderMarkdown, renderJson, renderFix, renderContext, renderDoctor, renderDiagnose } from "./report.ts";
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
 
 USAGE
   skill-probe --config <file.json> [options]                 # audit
   skill-probe context --config <file.json> [options]         # isolation vs co-loaded activation rates
+  skill-probe diagnose --config <file.json> [options]        # why a skill fails: routing-miss vs description
   skill-probe doctor [--cwd <dir>] [--config <file.json>]    # preflight: setup/auth/config sanity
   skill-probe gen [--cwd <dir>] > probe.config.json          # draft a test config from your skills
   skill-probe fix --config <file.json> --skill <name> [opts] # rewrite a description, prove the lift
@@ -77,6 +79,17 @@ function makeContextProgress(values: Record<string, unknown>): ((e: ContextProgr
   };
 }
 
+function makeDiagProgress(values: Record<string, unknown>): ((e: DiagProgress) => void) | undefined {
+  if (values["json"] || values["quiet"] || !process.stderr.isTTY) return undefined;
+  return (e: DiagProgress) => {
+    const p = e.prompt.length > 28 ? e.prompt.slice(0, 25) + "…" : e.prompt;
+    const line = `  [${e.caseIndex}/${e.caseTotal}] ${e.phase.padEnd(8)} "${p}" — run ${e.validN}/${e.maxK}`;
+    const pad = Math.max(0, progressLen - line.length);
+    process.stderr.write("\r" + line + " ".repeat(pad));
+    progressLen = line.length;
+  };
+}
+
 async function audit(values: Record<string, unknown>): Promise<number> {
   const cfg = loadConfig(values["config"] as string, {
     runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
@@ -90,6 +103,21 @@ async function audit(values: Record<string, unknown>): Promise<number> {
     : values["markdown"] ? renderMarkdown(result, { showCost })
     : renderTable(result, { showCost });
   console.log(text);
+  return result.exitCode;
+}
+
+async function diagnose(values: Record<string, unknown>): Promise<number> {
+  const cfg = loadConfig(values["config"] as string, {
+    runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
+    k: values["k"] as string | undefined, threshold: values["threshold"] as string | undefined,
+    conf: values["conf"] as string | undefined,
+  });
+  const result = await runDiagnose(cfg, {
+    ...(makeDiagProgress(values) ? { onProgress: makeDiagProgress(values)! } : {}),
+  });
+  clearProgress();
+  const showCost = !values["no-cost"];
+  console.log(values["json"] ? renderJson(result) : renderDiagnose(result, { showCost }));
   return result.exitCode;
 }
 
@@ -187,6 +215,7 @@ async function main(): Promise<void> {
     if (!values.config) { console.log(HELP); process.exit(2); }
     code = cmd === "fix" ? await fix(values)
       : cmd === "context" ? await context(values)
+      : cmd === "diagnose" ? await diagnose(values)
       : await audit(values);
   }
   process.exit(code);

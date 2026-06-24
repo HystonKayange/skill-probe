@@ -5,6 +5,7 @@ import type { AuditResult, Verdict } from "./eval.ts";
 import type { FixResult } from "./fix.ts";
 import type { ContextAuditResult } from "./context.ts";
 import type { DoctorResult } from "./doctor.ts";
+import type { DiagnoseResult, DiagVerdict } from "./diagnose.ts";
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const pval = (p: number) => (p < 0.001 ? "<0.001" : p.toFixed(3));
@@ -85,6 +86,39 @@ export function renderMarkdown(a: AuditResult, opts: RenderOpts = {}): string {
 
 export function renderJson(a: AuditResult | unknown): string {
   return JSON.stringify(a, null, 2);
+}
+
+/** intended (forced-choice routing) vs actual (real activation), classified into a remedy. */
+export function renderDiagnose(d: DiagnoseResult, opts: RenderOpts = {}): string {
+  const showCost = opts.showCost ?? true;
+  const LBL: Record<DiagVerdict, string> = {
+    "routes-ok": "✅ ROUTES-OK", "routing-miss": "🔀 ROUTING-MISS",
+    "description-problem": "✍ DESCRIPTION-PROBLEM", inconclusive: "⚠️ INCONCLUSIVE", error: "⛔ ERROR",
+  };
+  const out: string[] = [];
+  out.push(`skill-probe diagnose — runtime: ${d.runtime}  model: ${d.model}  threshold: ${pct(d.threshold)}`);
+  out.push(`  actual = real activation · intended = forced-choice routing (does the model even pick it?)`);
+  out.push("");
+  const dist = (m: Record<string, number>) =>
+    Object.entries(m).sort((p, q) => q[1] - p[1]).map(([s, n]) => `${s}×${n}`).join(", ") || "(none)";
+  for (const c of d.cases) {
+    out.push(`  [${LBL[c.verdict]}]  ${c.expected}  | ${c.prompt}`);
+    out.push(`        actual   fires ${pct(c.actual.rel.pHat)} [${pct(c.actual.rel.ciLow)}, ${pct(c.actual.rel.ciHigh)}] ` +
+      `k=${c.actual.rel.k}  (${dist(c.actual.stats.dist)})`);
+    out.push(`        intended picks ${pct(c.intended.rel.pHat)} [${pct(c.intended.rel.ciLow)}, ${pct(c.intended.rel.ciHigh)}] ` +
+      `k=${c.intended.rel.k}  (${dist(c.intended.stats.dist)})`);
+    out.push(`        → ${c.remedy}`);
+  }
+  if (d.skipped.length) {
+    out.push("");
+    out.push(`  skipped ${d.skipped.length} decoy case(s) — diagnose explains why an expected skill doesn't fire.`);
+  }
+  out.push("");
+  const counts = (v: DiagVerdict) => d.cases.filter((c) => c.verdict === v).length;
+  out.push(`Result: ${counts("routes-ok")} ok / ${counts("routing-miss")} routing-miss / ` +
+    `${counts("description-problem")} description-problem / ${counts("inconclusive") + counts("error")} other  ` +
+    `|  exit ${d.exitCode}` + (showCost ? `  |  cost $${d.totalCost.toFixed(4)}` : ""));
+  return out.join("\n");
 }
 
 export function renderDoctor(d: DoctorResult): string {
