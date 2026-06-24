@@ -3,8 +3,10 @@
 import { wilsonInterval } from "./stats.ts";
 import type { AuditResult, Verdict } from "./eval.ts";
 import type { FixResult } from "./fix.ts";
+import type { ContextAuditResult } from "./context.ts";
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
+const pval = (p: number) => (p < 0.001 ? "<0.001" : p.toFixed(3));
 const LABEL: Record<Verdict, string> = {
   pass: "PASS        ", fail: "FAIL        ",
   inconclusive: "INCONCLUSIVE", error: "ERROR       ",
@@ -82,6 +84,40 @@ export function renderMarkdown(a: AuditResult, opts: RenderOpts = {}): string {
 
 export function renderJson(a: AuditResult | unknown): string {
   return JSON.stringify(a, null, 2);
+}
+
+/** activation-rate-by-context: isolation vs co-loaded, with a Fisher's-exact p on the drop. */
+export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): string {
+  const showCost = opts.showCost ?? true;
+  const out: string[] = [];
+  out.push(`skill-probe context — runtime: ${a.runtime}  model: ${a.model}  ` +
+    `threshold: ${pct(a.threshold)}  library: ${a.librarySize} skills`);
+  out.push(`  isolation = only that skill loaded · co-loaded = the full library (${a.librarySize}) loaded`);
+  out.push("");
+  const ci = (r: { pHat: number; ciLow: number; ciHigh: number; k: number }) =>
+    `${pct(r.pHat)} [${pct(r.ciLow)}, ${pct(r.ciHigh)}] k=${r.k}`;
+  for (const c of a.cases) {
+    const flag = c.interference ? "⚠ INTERFERENCE" : "ok";
+    out.push(`  [${flag}]  ${c.expected}  | ${c.prompt}`);
+    out.push(`        isolation ${ci(c.isolation.rel)}`);
+    out.push(`        co-loaded ${ci(c.coLoaded.rel)}`);
+    out.push(`        Δ ${c.deltaP >= 0 ? "+" : ""}${pct(c.deltaP)} under load   Fisher p=${pval(c.fisherP)}`);
+    if (c.interference) {
+      const thieves = Object.keys(c.coLoaded.stats.dist)
+        .filter((s) => s !== c.expected && s !== "None");
+      out.push(`        ↳ fires reliably alone but is suppressed when the library is co-loaded` +
+        (thieves.length ? ` (stolen by: ${thieves.join(", ")})` : ""));
+    }
+  }
+  if (a.skipped.length) {
+    out.push("");
+    out.push(`  skipped ${a.skipped.length} case(s) with no isolable skill (decoy / unknown skill).`);
+  }
+  out.push("");
+  const n = a.cases.filter((c) => c.interference).length;
+  out.push(`Result: ${n} interference / ${a.cases.length} measured  |  exit ${a.exitCode}` +
+    (showCost ? `  |  cost $${a.totalCost.toFixed(4)}` : ""));
+  return out.join("\n");
 }
 
 export function renderFix(f: FixResult): string {

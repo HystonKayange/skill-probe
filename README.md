@@ -108,6 +108,37 @@ Claude Code vs OpenCode comparison is fair — otherwise you're comparing two co
   case is inconclusive the report prints the exact k for your threshold. Don't set `threshold
   0.9, k 10` and expect a pass — that's statistically impossible and the tool will say so.
 
+## Activation rate by context (`skill-probe context`)
+
+The audit measures every skill **co-loaded** — the real, hard condition. But a skill can fire
+*fine on its own* and only fail *under load*, when the rest of your library is competing for the
+same trigger. `context` exposes exactly that:
+
+```bash
+skill-probe context --config probe.config.json
+```
+
+For each case it measures the expected skill **in isolation** (a throwaway project with only that
+one skill) **and co-loaded** (your full library), then tests the drop with **Fisher's exact test**
+— so interference is reported as a real effect with a p-value, not eyeballed:
+
+```
+skill-probe context — runtime: claude-code  model: (runtime default)  threshold: 70%  library: 4 skills
+  isolation = only that skill loaded · co-loaded = the full library (4) loaded
+
+  [⚠ INTERFERENCE]  greeter  | write a birthday greeting
+        isolation 100% [72%, 100%] k=10
+        co-loaded 30% [11%, 60%] k=10
+        Δ -70% under load   Fisher p=0.003
+        ↳ fires reliably alone but is suppressed when the library is co-loaded (stolen by: welcomer)
+
+Result: 1 interference / 3 measured  |  exit 1
+```
+
+This is the "fires in isolation, fails under load X" case the aggregate rate hides. Decoy cases
+(`expected: null`) are skipped — there's no single skill to isolate. Exit `1` if any skill shows
+interference, else `0`.
+
 ## Fix a failing skill (`skill-probe fix`)
 
 Rewrite a skill's trigger description and **prove the lift is real** before keeping it:
@@ -137,17 +168,20 @@ doesn't measurably help is reverted.
 
 ## Status
 
-Early (v0.4). **Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping +
+Early (v0.5). **Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping +
 four-state verdict (pass / fail / inconclusive / **error**), across two runtimes (Claude Code,
 OpenCode). Infrastructure failures (timeout / auth / crash / empty output) are reported as
 `error`, never as a behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
 
+**Context (`skill-probe context`):** isolation-vs-co-loaded activation rates, with **Fisher's exact
+test** on the drop — catches skills that fire alone but are suppressed under the full library's load.
+
 **Fix (`skill-probe fix`):** uses the **Bayesian Beta-Binomial** to gate description rewrites on a
 *proven* lift (interleaved before/after, applied only if P(improvement) clears the bar).
 
-**Implemented + unit-tested but NOT yet used by any command:** Fisher's exact test and
-Benjamini-Hochberg FDR (`src/stats.ts`) — reserved for cross-case multiplicity control (a planned
-enhancement). Don't read the presence of these functions as the audit using them.
+**Implemented + unit-tested but NOT yet used by any command:** Benjamini-Hochberg FDR
+(`src/stats.ts`) — reserved for cross-case multiplicity control (a planned enhancement). Don't read
+its presence as the audit using it. (Fisher's exact test is now wired into `context`.)
 
 ## Dev
 

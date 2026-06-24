@@ -7,14 +7,16 @@ import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { runAudit, type ProgressEvent } from "./eval.ts";
 import { runFix } from "./fix.ts";
+import { runContextAudit, type ContextProgress } from "./context.ts";
 import { listSkills, generateCases, genConfig } from "./gen.ts";
 import { loadConfig, parseProbability, parseIntFlag, ConfigError } from "./config.ts";
-import { renderTable, renderMarkdown, renderJson, renderFix } from "./report.ts";
+import { renderTable, renderMarkdown, renderJson, renderFix, renderContext } from "./report.ts";
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
 
 USAGE
   skill-probe --config <file.json> [options]                 # audit
+  skill-probe context --config <file.json> [options]         # isolation vs co-loaded activation rates
   skill-probe gen [--cwd <dir>] > probe.config.json          # draft a test config from your skills
   skill-probe fix --config <file.json> --skill <name> [opts] # rewrite a description, prove the lift
 
@@ -58,6 +60,17 @@ function clearProgress(): void {
   if (progressLen) { process.stderr.write("\r" + " ".repeat(progressLen) + "\r"); progressLen = 0; }
 }
 
+function makeContextProgress(values: Record<string, unknown>): ((e: ContextProgress) => void) | undefined {
+  if (values["json"] || values["quiet"] || !process.stderr.isTTY) return undefined;
+  return (e: ContextProgress) => {
+    const p = e.prompt.length > 28 ? e.prompt.slice(0, 25) + "…" : e.prompt;
+    const line = `  [${e.caseIndex}/${e.caseTotal}] ${e.condition.padEnd(9)} "${p}" — run ${e.validN}/${e.maxK}`;
+    const pad = Math.max(0, progressLen - line.length);
+    process.stderr.write("\r" + line + " ".repeat(pad));
+    progressLen = line.length;
+  };
+}
+
 async function audit(values: Record<string, unknown>): Promise<number> {
   const cfg = loadConfig(values["config"] as string, {
     runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
@@ -71,6 +84,19 @@ async function audit(values: Record<string, unknown>): Promise<number> {
     : values["markdown"] ? renderMarkdown(result, { showCost })
     : renderTable(result, { showCost });
   console.log(text);
+  return result.exitCode;
+}
+
+async function context(values: Record<string, unknown>): Promise<number> {
+  const cfg = loadConfig(values["config"] as string, {
+    runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
+    k: values["k"] as string | undefined, threshold: values["threshold"] as string | undefined,
+    conf: values["conf"] as string | undefined,
+  });
+  const result = await runContextAudit(cfg, makeContextProgress(values));
+  clearProgress();
+  const showCost = !values["no-cost"];
+  console.log(values["json"] ? renderJson(result) : renderContext(result, { showCost }));
   return result.exitCode;
 }
 
@@ -138,7 +164,9 @@ async function main(): Promise<void> {
     code = await gen(values);
   } else {
     if (!values.config) { console.log(HELP); process.exit(2); }
-    code = cmd === "fix" ? await fix(values) : await audit(values);
+    code = cmd === "fix" ? await fix(values)
+      : cmd === "context" ? await context(values)
+      : await audit(values);
   }
   process.exit(code);
 }
