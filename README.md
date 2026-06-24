@@ -12,8 +12,21 @@ Complements static linters like `skill-audit` (security/quality) — this is **b
 > **How it works / requirements.** skill-probe is a **terminal CLI**, *not* an in-agent slash
 > command. It drives your local runtime CLI under the hood, so you need that runtime installed and
 > authenticated: **`claude`** (logged in) for `runtime: claude-code`, or **`opencode`** for
-> `runtime: opencode`. `gen`/`fix` use `ANTHROPIC_API_KEY` if set, otherwise the local `claude` CLI.
+> `runtime: opencode`. `gen`/`fix`/`diagnose` use `ANTHROPIC_API_KEY` if set, otherwise the local `claude` CLI.
 > Codex/Gemini runtimes aren't supported yet (their traces don't expose which skill fired).
+
+The workflow:
+
+```text
+doctor → gen → audit → context → diagnose → fix
+```
+
+- `doctor`: verify setup, auth, runtime, skills, and config before spending probes.
+- `gen`: draft a probe config from your existing skills.
+- `audit`: measure which skill actually fires when the whole library is co-loaded.
+- `context`: compare isolation vs co-loaded activation to catch library interference.
+- `diagnose`: explain whether a failure is a routing miss or a description problem.
+- `fix`: rewrite a skill description and keep it only if the measured reliability improves.
 
 ## Why
 
@@ -62,7 +75,7 @@ the live (costing) auth check.
 Don't want to hand-write the cases? Draft them from your skills, then review:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...  skill-probe gen --cwd . > probe.config.json
+skill-probe gen --cwd . > probe.config.json
 ```
 It reads each `.claude/skills/*/SKILL.md`, and an LLM drafts realistic should-fire prompts per
 skill, cross-skill **near-misses** (to surface mis-routing), and off-topic **decoys**. Hallucinated
@@ -72,9 +85,9 @@ skill names are dropped automatically. Flags: `--per-skill <n>` (default 3), `--
 > **Always review the draft before running.** Generators lean toward obvious keyword-matches; you
 > add the messy, oblique phrasings real users type (that's where triggering actually fails).
 
-`gen` (and `fix`) use `ANTHROPIC_API_KEY` if it's set, otherwise they fall back to the logged-in
-**`claude` CLI** — so on a Claude subscription the whole tool (audit, gen, fix) works with **no API
-key at all**.
+`gen`, `fix`, and `diagnose` use `ANTHROPIC_API_KEY` if it's set, otherwise they fall back to the
+logged-in **`claude` CLI** — so on a Claude subscription the whole tool works with **no API key at
+all**.
 
 ## Use
 
@@ -253,13 +266,26 @@ doesn't measurably help is reverted.
 
 ## Status
 
-Early (v0.5). **Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping +
-four-state verdict (pass / fail / inconclusive / **error**), across two runtimes (Claude Code,
-OpenCode). Infrastructure failures (timeout / auth / crash / empty output) are reported as
-`error`, never as a behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
+Early, but usable end to end.
+
+**Doctor (`skill-probe doctor`):** setup/auth/config preflight. Checks Node, `.claude/skills/`,
+`SKILL.md` frontmatter, config expected skills, runtime CLI availability, and optional live auth
+probe.
+
+**Gen (`skill-probe gen`):** drafts a reviewable probe config from existing skills, including
+should-fire prompts, near-misses, and decoys.
+
+**Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping + four-state verdict
+(pass / fail / inconclusive / **error**), across two runtimes (Claude Code, OpenCode).
+Infrastructure failures (timeout / auth / crash / empty output) are reported as `error`, never as
+a behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
 
 **Context (`skill-probe context`):** isolation-vs-co-loaded activation rates, with **Fisher's exact
 test** on the drop — catches skills that fire alone but are suppressed under the full library's load.
+
+**Diagnose (`skill-probe diagnose`):** compares actual runtime activation against intended
+forced-choice routing to classify failures as routing-miss vs description-problem. Intended routing
+is a heuristic, not ground truth, and the README calls that out explicitly.
 
 **Fix (`skill-probe fix`):** uses the **Bayesian Beta-Binomial** to gate description rewrites on a
 *proven* lift (interleaved before/after, applied only if P(improvement) clears the bar).
