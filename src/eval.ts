@@ -4,6 +4,7 @@ import type { Config } from "./types.ts";
 import { reliability, sequentialDecision } from "./stats.ts";
 import { measure, type RunStats } from "./orchestrator.ts";
 import { getAdapter } from "./adapters/index.ts";
+import { buildManifest, type RunManifest } from "./manifest.ts";
 
 /** Four honest states. `error` = the runtime failed enough that the measurement is untrustworthy. */
 export type Verdict = "pass" | "fail" | "inconclusive" | "error";
@@ -28,6 +29,8 @@ export interface AuditResult {
   counts: { pass: number; fail: number; inconclusive: number; error: number };
   /** 0 = all pass; 1 = a behavioral failure/theft; 2 = inconclusive or infrastructure error */
   exitCode: 0 | 1 | 2;
+  /** who/what/when of this run — makes reports citable and baselines comparable */
+  manifest: RunManifest;
 }
 
 function verdictFor(stats: RunStats, decision: CaseResult["decision"], theft: string[]): Verdict {
@@ -77,9 +80,9 @@ export async function runAudit(
       theft, decision, verdict: verdictFor(stats, decision, theft),
     });
   }
-  // NOTE: Benjamini-Hochberg multiplicity control over per-case exact-test p-values lands in M2,
-  // once each case carries a real p-value rather than a CI decision. The functions are tested
-  // in stats.ts but are NOT yet wired into this audit path.
+  // NOTE: per-case verdicts here are CI decisions vs the threshold, not p-values — so there is no
+  // family to BH-correct in this path. Where families of Fisher tests exist (context, ablation,
+  // baseline comparison) the correction is applied.
 
   const counts = {
     pass: cases.filter((c) => c.verdict === "pass").length,
@@ -93,5 +96,6 @@ export async function runAudit(
   return {
     runtime: cfg.runtime, model: cfg.model ?? "(runtime default)",
     threshold: cfg.threshold, cases, totalCost, counts, exitCode,
+    manifest: buildManifest("audit", cfg),
   };
 }

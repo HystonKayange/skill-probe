@@ -12,7 +12,8 @@ import { runDiagnose, type DiagProgress } from "./diagnose.ts";
 import { runDoctor } from "./doctor.ts";
 import { listSkills, generateCases, genConfig } from "./gen.ts";
 import { loadConfig, parseProbability, parseIntFlag, ConfigError } from "./config.ts";
-import { renderTable, renderMarkdown, renderJson, renderFix, renderContext, renderDoctor, renderDiagnose } from "./report.ts";
+import { loadBaseline, saveBaseline, compareToBaseline, type BaselineComparison } from "./baseline.ts";
+import { renderTable, renderMarkdown, renderJson, renderFix, renderContext, renderDoctor, renderDiagnose, renderBaseline } from "./report.ts";
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
 
@@ -37,6 +38,11 @@ OPTIONS
       --markdown           emit a Markdown table (paste into a PR/README)
       --no-cost            hide the cost line (e.g. when on a Claude subscription)
       --quiet              suppress the live progress line on stderr
+  audit only (CI gating):
+      --save-baseline <f>  after the run, save per-case counts + a run manifest to <f>
+      --baseline <f>       compare this run against a saved baseline: per-case Fisher's exact,
+                           Benjamini-Hochberg corrected — exit 1 ONLY on a significant regression
+                           (noise passes; real drops fail)
   context only:
       --ablate             leave-one-out: for each interference case, re-run with each suspect
                            sibling removed and NAME the thief when activation recovers (Fisher +
@@ -105,10 +111,21 @@ async function audit(values: Record<string, unknown>): Promise<number> {
   const result = await runAudit(cfg, makeProgress(values));
   clearProgress();
   const showCost = !values["no-cost"];
-  const text = values["json"] ? renderJson(result)
-    : values["markdown"] ? renderMarkdown(result, { showCost })
-    : renderTable(result, { showCost });
+
+  let cmp: BaselineComparison | undefined;
+  if (values["baseline"]) cmp = compareToBaseline(result, loadBaseline(values["baseline"] as string));
+  if (values["save-baseline"]) {
+    saveBaseline(result, values["save-baseline"] as string);
+    console.error(`baseline saved to ${values["save-baseline"]}`);
+  }
+
+  const text = values["json"] ? renderJson(cmp ? { ...result, baseline: cmp } : result)
+    : values["markdown"] ? renderMarkdown(result, { showCost }) + (cmp ? "\n\n" + renderBaseline(cmp) : "")
+    : renderTable(result, { showCost }) + (cmp ? "\n\n" + renderBaseline(cmp) : "");
   console.log(text);
+  // precedence mirrors the rest of the tool: a behavioral signal (fail/regression, 1) outranks
+  // inconclusive/infra (2), which outranks clean (0).
+  if (result.exitCode === 1 || cmp?.exitCode === 1) return 1;
   return result.exitCode;
 }
 
@@ -206,6 +223,8 @@ async function main(): Promise<void> {
       decoys: { type: "string" },
       ablate: { type: "boolean", default: false },
       suspects: { type: "string" },
+      baseline: { type: "string" },
+      "save-baseline": { type: "string" },
       "skip-probe": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       markdown: { type: "boolean", default: false },

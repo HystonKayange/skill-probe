@@ -6,6 +6,7 @@ import type { FixResult } from "./fix.ts";
 import type { ContextAuditResult } from "./context.ts";
 import type { DoctorResult } from "./doctor.ts";
 import type { DiagnoseResult, DiagVerdict } from "./diagnose.ts";
+import type { BaselineComparison } from "./baseline.ts";
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const pval = (p: number) => (p < 0.001 ? "<0.001" : p.toFixed(3));
@@ -208,6 +209,35 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
     (culprits.length ? `  |  thieves named: ${culprits.join(", ")}` : "") +
     `  |  exit ${a.exitCode}` +
     (showCost ? `  |  cost $${a.totalCost.toFixed(4)}` : ""));
+  return out.join("\n");
+}
+
+/** regression gate vs a saved baseline: only significant (BH-corrected) drops fail the build. */
+export function renderBaseline(cmp: BaselineComparison): string {
+  const out: string[] = [];
+  out.push(`Baseline gate — vs baseline saved ${cmp.baselineDate} (skill-probe ${cmp.baselineVersion})`);
+  for (const m of cmp.mismatches) out.push(`  ⚠ ${m}`);
+  for (const r of cmp.cases) {
+    if (r.untrustworthy) {
+      out.push(`  [⛔ NOT COMPARABLE]  ${r.expected ?? "(decoy)"}  | ${r.prompt} — a side has no valid probes`);
+      continue;
+    }
+    if (!r.regressed && !r.improved) continue; // stable cases are summarized, not listed
+    const flag = r.regressed ? "▼ REGRESSED" : "▲ improved";
+    out.push(`  [${flag}]  ${r.expected ?? "(decoy)"}  | ${r.prompt}`);
+    out.push(`        ${pct(r.before.pHat)} (${r.before.hits}/${r.before.n}) → ${pct(r.after.pHat)} ` +
+      `(${r.after.hits}/${r.after.n})   Δ${r.delta >= 0 ? "+" : ""}${pct(r.delta)}   ` +
+      `p=${pval(r.fisherP)} · adj ${pval(r.fisherPAdj)}`);
+  }
+  const extras: string[] = [];
+  if (cmp.newCases.length) extras.push(`${cmp.newCases.length} new case(s) not in baseline (measured, not gated)`);
+  if (cmp.missingCases.length) extras.push(`${cmp.missingCases.length} baseline case(s) missing from this run`);
+  if (extras.length) out.push(`  ${extras.join(" · ")}`);
+  out.push(cmp.regressions
+    ? `Gate: ▼ FAIL — ${cmp.regressions} significant regression(s)` +
+      (cmp.improvements ? `, ${cmp.improvements} improvement(s)` : "")
+    : `Gate: ✅ no significant regressions (${cmp.cases.length} gated` +
+      (cmp.improvements ? `, ${cmp.improvements} improved — consider re-saving the baseline` : "") + `)`);
   return out.join("\n");
 }
 

@@ -12,6 +12,7 @@ import { measure, infraUntrustworthy, type RunStats } from "./orchestrator.ts";
 import { getAdapter } from "./adapters/index.ts";
 import { listSkills } from "./gen.ts";
 import { ConfigError } from "./config.ts";
+import { buildManifest, type RunManifest } from "./manifest.ts";
 
 /** Build a throwaway project dir whose .claude/skills/ holds ONLY the named skills (copied from
  * srcCwd). Returns its path plus a cleanup(). The probe runs against this dir to load a subset. */
@@ -79,6 +80,8 @@ export interface ContextAuditResult {
   totalCost: number;
   /** 0 = no interference; 1 = a skill is suppressed under load; 2 = an untrustworthy (infra) case */
   exitCode: 0 | 1 | 2;
+  /** who/what/when of this run — makes reports citable and comparable */
+  manifest: RunManifest;
 }
 
 export interface ContextProgress {
@@ -250,5 +253,6 @@ export async function runContextAudit(
     runtime: cfg.runtime, model: cfg.model ?? "(runtime default)",
     threshold: cfg.threshold, conf: cfg.conf, librarySize: library.length,
     cases: measured, skipped, totalCost, exitCode,
+    manifest: buildManifest("context", cfg),
   };
 }

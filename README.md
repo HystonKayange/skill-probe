@@ -27,7 +27,8 @@ doctor → gen → audit → context → diagnose → fix
 
 - `doctor`: verify setup, auth, runtime, skills, and config before spending probes.
 - `gen`: draft a probe config from your existing skills.
-- `audit`: measure which skill actually fires when the whole library is co-loaded.
+- `audit`: measure which skill actually fires when the whole library is co-loaded — with
+  `--baseline`, gate CI on statistically significant regressions only.
 - `context`: compare isolation vs co-loaded activation to catch library interference —
   add `--ablate` to name **which** sibling is stealing the trigger.
 - `diagnose`: explain whether a failure is a routing miss or a description problem.
@@ -157,16 +158,64 @@ Claude Code vs OpenCode comparison is fair — otherwise you're comparing two co
 
 ## CI usage
 
-skill-probe exits non-zero on a real problem, so it drops straight into a pipeline:
+skill-probe exits non-zero on a real problem, so it drops straight into a pipeline. Exit codes:
+**`0`** all pass · **`1`** a behavioral fail / trigger-theft / interference / regression · **`2`**
+inconclusive or an infrastructure error — so a runtime outage *fails* the build instead of silently
+passing. Add `--json` to archive the full result (it includes a **run manifest**: tool version,
+model, date, config hash — so two runs are comparable and a report is citable).
 
-```yaml
-# .github/workflows/skills.yml  (the claude/opencode CLI must be installed + authed on the runner)
-- run: npx skill-probe --config probe.config.json --quiet --no-cost
+### Regression gating (`--baseline`)
+
+The CI question isn't "are my skills perfect?" — it's **"did this PR make any skill worse?"**
+Activation is stochastic, so comparing raw rates makes CI flaky. The baseline gate compares each
+case against a saved baseline with **Fisher's exact test, Benjamini-Hochberg corrected** — noise
+passes, real drops fail:
+
+```bash
+# once, on a good main build (commit the file):
+skill-probe --config probe.config.json --save-baseline baselines/main.json
+
+# on every PR:
+skill-probe --config probe.config.json --baseline baselines/main.json
 ```
 
-Exit codes: **`0`** all pass · **`1`** a behavioral fail / trigger-theft / interference · **`2`**
-inconclusive or an infrastructure error — so a runtime outage *fails* the build instead of silently
-passing. Add `--json` to archive the full result as a build artifact.
+```
+Baseline gate — vs baseline saved 2026-07-02T09:12:03Z (skill-probe 0.9.0)
+  [▼ REGRESSED]  greeter  | write a birthday greeting
+        90% (9/10) → 20% (2/10)   Δ-70%   p=0.005 · adj 0.005
+Gate: ▼ FAIL — 1 significant regression(s)
+```
+
+The gate warns (but still runs, matching cases by prompt) if the config, runtime, or model changed
+since the baseline — apples-to-oranges comparisons are flagged, never silent. Significant
+*improvements* are reported too, as a nudge to re-save the baseline.
+
+### GitHub Action
+
+```yaml
+# .github/workflows/skills.yml
+name: skills
+on: pull_request
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - uses: HystonKayange/skill-probe@main
+        with:
+          config: probe.config.json
+          args: --baseline baselines/main.json
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+The action installs skill-probe plus the runtime CLI (Claude Code by default; set
+`runtime-package: ""` if your runner already has one) and runs the command. `command:` selects
+`audit` (default), `context`, `diagnose`, or `doctor`; `args:` passes extra flags like `--ablate`.
+The runtime authenticates via `ANTHROPIC_API_KEY` — headless probes each cost real tokens, so
+smoke settings (`k: 10`, few cases) are the sweet spot for per-PR gating.
 
 ## Activation rate by context (`skill-probe context`)
 
@@ -320,7 +369,10 @@ should-fire prompts, near-misses, and decoys.
 (pass / fail / inconclusive / **error**), across two runtimes (Claude Code, OpenCode).
 Infrastructure failures (timeout / auth / crash / empty output / a zero-cost response where the
 model never actually ran, e.g. a usage-limit window) are reported as `error`, never as a
-behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
+behavioral pass/fail — a decoy can't falsely pass because the runtime was down. Every run carries
+a **manifest** (version, model, date, config hash); `--save-baseline` / `--baseline` turn audits
+into a CI regression gate (Fisher + BH — noise passes, real drops fail), and a **GitHub Action**
+(`HystonKayange/skill-probe@main`) wraps the whole thing for per-PR gating.
 
 **Context (`skill-probe context`):** isolation-vs-co-loaded activation rates, with **Fisher's exact
 test** on the drop and **Benjamini-Hochberg correction** across cases — catches skills that fire

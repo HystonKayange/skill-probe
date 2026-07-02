@@ -1,0 +1,20 @@
+# Unit tests + typecheck on every push/PR. Zero API calls, zero secrets — the statistical core
+# and all command logic are tested against mock adapters.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          check-latest: true
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

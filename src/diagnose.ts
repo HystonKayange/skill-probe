@@ -18,6 +18,7 @@ import { getAdapter } from "./adapters/index.ts";
 import { listSkills, type SkillInfo } from "./gen.ts";
 import { complete } from "./llm.ts";
 import { ConfigError } from "./config.ts";
+import { buildManifest, type RunManifest } from "./manifest.ts";
 
 export type DiagVerdict = "routes-ok" | "routing-miss" | "description-problem" | "inconclusive" | "error";
 
@@ -47,6 +48,8 @@ export interface DiagnoseResult {
   skipped: string[];
   totalCost: number;
   exitCode: 0 | 1 | 2;
+  /** who/what/when of this run — makes reports citable and comparable */
+  manifest: RunManifest;
 }
 
 export interface DiagProgress {
@@ -200,5 +203,6 @@ export async function runDiagnose(
   return {
     runtime: cfg.runtime, model: cfg.model ?? "(runtime default)",
     threshold: cfg.threshold, conf: cfg.conf, cases, skipped, totalCost, exitCode,
+    manifest: buildManifest("diagnose", cfg),
   };
 }

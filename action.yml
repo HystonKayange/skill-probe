@@ -1,0 +1,48 @@
+name: "skill-probe"
+description: >-
+  Statistically audit an AI agent skill library: activation rates with confidence intervals,
+  co-loading interference (and which sibling steals the trigger), and baseline regression gating.
+author: "HystonKayange"
+branding:
+  icon: "activity"
+  color: "purple"
+
+inputs:
+  config:
+    description: "Path to the probe config JSON (see `skill-probe gen`)"
+    required: true
+  command:
+    description: "Subcommand to run: audit (default), context, diagnose, or doctor"
+    required: false
+    default: "audit"
+  args:
+    description: "Extra CLI flags, e.g. '--ablate' or '--baseline baselines/main.json'"
+    required: false
+    default: ""
+  version:
+    description: "skill-probe version to install"
+    required: false
+    default: "latest"
+  runtime-package:
+    description: >-
+      npm package of the agent runtime CLI to install (the thing that actually loads skills).
+      Default installs Claude Code; set to '' if your runner already has a runtime installed.
+    required: false
+    default: "@anthropic-ai/claude-code"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install skill-probe (and the runtime CLI)
+      shell: bash
+      run: |
+        npm install -g "skill-probe@${{ inputs.version }}"
+        if [ -n "${{ inputs.runtime-package }}" ]; then
+          npm install -g "${{ inputs.runtime-package }}"
+        fi
+    - name: Run skill-probe
+      shell: bash
+      run: |
+        CMD="${{ inputs.command }}"
+        [ "$CMD" = "audit" ] && CMD=""
+        skill-probe $CMD --config "${{ inputs.config }}" --quiet --no-cost ${{ inputs.args }}
