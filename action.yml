@@ -1,7 +1,5 @@
-name: "skill-probe"
-description: >-
-  Statistically audit an AI agent skill library: activation rates with confidence intervals,
-  co-loading interference (and which sibling steals the trigger), and baseline regression gating.
+name: "Skill Probe - AI Agent Skill Auditor"
+description: "Statistically audit AI agent skill libraries: activation rates with CIs, co-loading interference, regression gating."
 author: "HystonKayange"
 branding:
   icon: "activity"
