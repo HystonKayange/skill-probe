@@ -1,5 +1,8 @@
 # skill-probe
 
+[![ci](https://github.com/HystonKayange/skill-probe/actions/workflows/ci.yml/badge.svg)](https://github.com/HystonKayange/skill-probe/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/skill-probe)](https://www.npmjs.com/package/skill-probe)
+
 Runtime-agnostic, **co-loaded-aware** auditor for an AI agent's skill library. It measures
 which skill *actually* fires (by real activation, not keyword matching) when your whole
 `SKILL.md` library is loaded together — with **statistical confidence**, not single-shot guesses.
