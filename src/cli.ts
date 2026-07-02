@@ -18,7 +18,7 @@ const HELP = `skill-probe — audit a co-loaded agent skill library by real acti
 
 USAGE
   skill-probe --config <file.json> [options]                 # audit
-  skill-probe context --config <file.json> [options]         # isolation vs co-loaded activation rates
+  skill-probe context --config <file.json> [--ablate]        # isolation vs co-loaded activation rates
   skill-probe diagnose --config <file.json> [options]        # why a skill fails: routing-miss vs description
   skill-probe doctor [--cwd <dir>] [--config <file.json>]    # preflight: setup/auth/config sanity
   skill-probe gen [--cwd <dir>] > probe.config.json          # draft a test config from your skills
@@ -37,6 +37,11 @@ OPTIONS
       --markdown           emit a Markdown table (paste into a PR/README)
       --no-cost            hide the cost line (e.g. when on a Claude subscription)
       --quiet              suppress the live progress line on stderr
+  context only:
+      --ablate             leave-one-out: for each interference case, re-run with each suspect
+                           sibling removed and NAME the thief when activation recovers (Fisher +
+                           Benjamini-Hochberg corrected)
+      --suspects <n>       max siblings to ablate per case, ranked by probes stolen (default 3)
   doctor only:
       --cwd <dir>          project dir containing .claude/skills/ (default: .)
       --config <file>      also sanity-check a config (expected skills exist, k/threshold feasible)
@@ -72,7 +77,8 @@ function makeContextProgress(values: Record<string, unknown>): ((e: ContextProgr
   if (values["json"] || values["quiet"] || !process.stderr.isTTY) return undefined;
   return (e: ContextProgress) => {
     const p = e.prompt.length > 28 ? e.prompt.slice(0, 25) + "…" : e.prompt;
-    const line = `  [${e.caseIndex}/${e.caseTotal}] ${e.condition.padEnd(9)} "${p}" — run ${e.validN}/${e.maxK}`;
+    const cond = e.condition === "ablation" ? `−${e.removed}` : e.condition;
+    const line = `  [${e.caseIndex}/${e.caseTotal}] ${cond.padEnd(9)} "${p}" — run ${e.validN}/${e.maxK}`;
     const pad = Math.max(0, progressLen - line.length);
     process.stderr.write("\r" + line + " ".repeat(pad));
     progressLen = line.length;
@@ -139,7 +145,12 @@ async function context(values: Record<string, unknown>): Promise<number> {
     k: values["k"] as string | undefined, threshold: values["threshold"] as string | undefined,
     conf: values["conf"] as string | undefined,
   });
-  const result = await runContextAudit(cfg, makeContextProgress(values));
+  const suspects = parseIntFlag(values["suspects"] as string | undefined, "--suspects", 3, 1);
+  const onProgress = makeContextProgress(values);
+  const result = await runContextAudit(cfg, {
+    ablate: Boolean(values["ablate"]), suspects,
+    ...(onProgress ? { onProgress } : {}),
+  });
   clearProgress();
   const showCost = !values["no-cost"];
   console.log(values["json"] ? renderJson(result) : renderContext(result, { showCost }));
@@ -193,6 +204,8 @@ async function main(): Promise<void> {
       cwd: { type: "string" },
       "per-skill": { type: "string" },
       decoys: { type: "string" },
+      ablate: { type: "boolean", default: false },
+      suspects: { type: "string" },
       "skip-probe": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       markdown: { type: "boolean", default: false },

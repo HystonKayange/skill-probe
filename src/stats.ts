@@ -145,6 +145,23 @@ export function probImprovement(
   };
 }
 
+/** Benjamini-Hochberg step-up ADJUSTED p-values: adj[i] = min over ranks j>=rank(i) of m*p_(j)/j.
+ * adj[i] <= q ⟺ benjaminiHochberg(pvals, q) rejects i, but the adjusted value is reportable
+ * next to the raw p so the multiple-comparisons correction is visible, not silent. */
+export function bhAdjust(pvals: number[]): number[] {
+  const m = pvals.length;
+  if (m === 0) return [];
+  const order = [...pvals.keys()].sort((i, j) => pvals[i]! - pvals[j]!);
+  const adj = new Array<number>(m).fill(1);
+  let running = 1;
+  for (let idx = m - 1; idx >= 0; idx--) {
+    const i = order[idx]!;
+    running = Math.min(running, (pvals[i]! * m) / (idx + 1));
+    adj[i] = Math.min(1, running);
+  }
+  return adj;
+}
+
 /** Benjamini-Hochberg FDR. Returns booleans (true = flag as real). */
 export function benjaminiHochberg(pvals: number[], q = 0.05): boolean[] {
   const m = pvals.length;

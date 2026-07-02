@@ -140,6 +140,11 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
   out.push(`skill-probe context — runtime: ${a.runtime}  model: ${a.model}  ` +
     `threshold: ${pct(a.threshold)}  library: ${a.librarySize} skills`);
   out.push(`  isolation = only that skill loaded · co-loaded = the full library (${a.librarySize}) loaded`);
+  const familyN = a.cases.filter((c) => !c.untrustworthy).length;
+  if (familyN > 1) {
+    out.push(`  ${familyN} comparisons — interference decided on Benjamini-Hochberg adjusted p<0.05` +
+      ` (raw p across a family overcounts)`);
+  }
   out.push("");
   const ci = (r: { pHat: number; ciLow: number; ciHigh: number; k: number }) =>
     `${pct(r.pHat)} [${pct(r.ciLow)}, ${pct(r.ciHigh)}] k=${r.k}`;
@@ -157,12 +162,36 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
     out.push(`  [${flag}]  ${c.expected}  | ${c.prompt}`);
     out.push(`        isolation ${ci(c.isolation.rel)}`);
     out.push(`        co-loaded ${ci(c.coLoaded.rel)}`);
-    out.push(`        Δ ${c.deltaP >= 0 ? "+" : ""}${pct(c.deltaP)} under load   Fisher p=${pval(c.fisherP)}`);
+    out.push(`        Δ ${c.deltaP >= 0 ? "+" : ""}${pct(c.deltaP)} under load   Fisher p=${pval(c.fisherP)}` +
+      (familyN > 1 ? ` · BH-adj p=${pval(c.fisherPAdj)}` : ""));
     if (c.interference) {
       const thieves = Object.keys(c.coLoaded.stats.dist)
         .filter((s) => s !== c.expected && s !== "None");
       out.push(`        ↳ fires reliably alone but is suppressed when the library is co-loaded` +
         (thieves.length ? ` (stolen by: ${thieves.join(", ")})` : ""));
+      if (c.ablation) {
+        if (c.ablation.length === 0) {
+          out.push(`        leave-one-out: no sibling stole these probes (suppressed to None) — ` +
+            `dilution, not theft; nothing to ablate`);
+        } else {
+          out.push(`        leave-one-out (each suspect removed, recovery vs co-loaded):`);
+          for (const abl of c.ablation) {
+            if (abl.untrustworthy) {
+              out.push(`          − ${abl.removed}: infra errors dominated — run not trustworthy`);
+              continue;
+            }
+            const tag = abl.culprit
+              ? (abl.rel.pHat >= a.threshold ? "  ← THIEF (full recovery)" : "  ← THIEF (partial recovery)")
+              : "";
+            out.push(`          − ${abl.removed} removed → ${ci(abl.rel)}  ` +
+              `Δ${abl.deltaVsCoLoaded >= 0 ? "+" : ""}${pct(abl.deltaVsCoLoaded)}  ` +
+              `p=${pval(abl.fisherP)} · adj ${pval(abl.fisherPAdj)}${tag}`);
+          }
+          if (!c.ablation.some((abl) => abl.culprit)) {
+            out.push(`          no single culprit confirmed — interference may be combinatorial`);
+          }
+        }
+      }
     }
   }
   if (a.skipped.length) {
@@ -172,8 +201,12 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
   out.push("");
   const interfN = a.cases.filter((c) => c.interference).length;
   const errN = a.cases.filter((c) => c.untrustworthy).length;
+  const culprits = [...new Set(a.cases.flatMap((c) =>
+    (c.ablation ?? []).filter((abl) => abl.culprit).map((abl) => abl.removed)))];
   out.push(`Result: ${interfN} interference / ${a.cases.length} measured` +
-    (errN ? ` / ${errN} error` : "") + `  |  exit ${a.exitCode}` +
+    (errN ? ` / ${errN} error` : "") +
+    (culprits.length ? `  |  thieves named: ${culprits.join(", ")}` : "") +
+    `  |  exit ${a.exitCode}` +
     (showCost ? `  |  cost $${a.totalCost.toFixed(4)}` : ""));
   return out.join("\n");
 }

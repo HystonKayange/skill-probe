@@ -28,7 +28,8 @@ doctor → gen → audit → context → diagnose → fix
 - `doctor`: verify setup, auth, runtime, skills, and config before spending probes.
 - `gen`: draft a probe config from your existing skills.
 - `audit`: measure which skill actually fires when the whole library is co-loaded.
-- `context`: compare isolation vs co-loaded activation to catch library interference.
+- `context`: compare isolation vs co-loaded activation to catch library interference —
+  add `--ablate` to name **which** sibling is stealing the trigger.
 - `diagnose`: explain whether a failure is a routing miss or a description problem.
 - `fix`: rewrite a skill description and keep it only if the measured reliability improves.
 
@@ -179,16 +180,20 @@ skill-probe context --config probe.config.json
 
 For each case it measures the expected skill **in isolation** (a throwaway project with only that
 one skill) **and co-loaded** (your full library), then tests the drop with **Fisher's exact test**
-— so interference is reported as a real effect with a p-value, not eyeballed:
+— so interference is reported as a real effect with a p-value, not eyeballed. Across multiple
+cases the p-values are **Benjamini-Hochberg corrected** (one Fisher test per case is a *family*:
+raw `p<0.05` over a 40-case library expects ~2 false flags by chance alone — interference is
+decided on the adjusted p, and the report shows both):
 
 ```
 skill-probe context — runtime: claude-code  model: (runtime default)  threshold: 70%  library: 4 skills
   isolation = only that skill loaded · co-loaded = the full library (4) loaded
+  3 comparisons — interference decided on Benjamini-Hochberg adjusted p<0.05 (raw p across a family overcounts)
 
   [⚠ INTERFERENCE]  greeter  | write a birthday greeting
         isolation 100% [72%, 100%] k=10
         co-loaded 30% [11%, 60%] k=10
-        Δ -70% under load   Fisher p=0.003
+        Δ -70% under load   Fisher p=0.003 · BH-adj p=0.009
         ↳ fires reliably alone but is suppressed when the library is co-loaded (stolen by: welcomer)
 
 Result: 1 interference / 3 measured  |  exit 1
@@ -199,6 +204,38 @@ This is the "fires in isolation, fails under load X" case the aggregate rate hid
 in the library is a config error (typo), surfaced before any probes run. Exit `1` if any skill
 shows interference, `2` if a case is untrustworthy (infra errors dominated — never a silent pass),
 else `0`.
+
+### Name the thief (`--ablate`)
+
+Knowing *that* a skill is suppressed is half the diagnosis — the other half is **which sibling is
+stealing it**. With 3 skills you can guess; with 40 you can't. `--ablate` answers it with evidence:
+
+```bash
+skill-probe context --config probe.config.json --ablate
+```
+
+For each interference case it takes the suspects (ranked by how many probes they actually stole in
+the co-loaded run, capped by `--suspects`, default 3), removes them from the library **one at a
+time**, and re-measures. If activation recovers significantly (Fisher vs the co-loaded run,
+BH-corrected across all ablation runs), that sibling is the thief — named, with a p-value:
+
+```
+  [⚠ INTERFERENCE]  greeter  | write a greeting for my new teammate
+        isolation 100% [61%, 100%] k=6
+        co-loaded 0% [0%, 56%] k=3
+        Δ -100% under load   Fisher p=0.012
+        ↳ fires reliably alone but is suppressed when the library is co-loaded (stolen by: welcomer)
+        leave-one-out (each suspect removed, recovery vs co-loaded):
+          − welcomer removed → 100% [61%, 100%] k=6  Δ+100%  p=0.012 · adj 0.012  ← THIEF (full recovery)
+
+Result: 1 interference / 1 measured  |  thieves named: welcomer  |  exit 1
+```
+
+(That's a real run.) Honest edge cases: if the co-loaded probes were suppressed to **None** —
+nothing stole them, the skill just stops firing under load — there's no suspect to remove, and the
+report says *"dilution, not theft; nothing to ablate"* instead of guessing. If no single removal
+recovers activation, it says so ("interference may be combinatorial") rather than naming an
+innocent sibling.
 
 ## Why a skill fails (`skill-probe diagnose`)
 
@@ -281,11 +318,15 @@ should-fire prompts, near-misses, and decoys.
 
 **Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping + four-state verdict
 (pass / fail / inconclusive / **error**), across two runtimes (Claude Code, OpenCode).
-Infrastructure failures (timeout / auth / crash / empty output) are reported as `error`, never as
-a behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
+Infrastructure failures (timeout / auth / crash / empty output / a zero-cost response where the
+model never actually ran, e.g. a usage-limit window) are reported as `error`, never as a
+behavioral pass/fail — a decoy can't falsely pass because the runtime was down.
 
 **Context (`skill-probe context`):** isolation-vs-co-loaded activation rates, with **Fisher's exact
-test** on the drop — catches skills that fire alone but are suppressed under the full library's load.
+test** on the drop and **Benjamini-Hochberg correction** across cases — catches skills that fire
+alone but are suppressed under the full library's load, without buying false flags on big libraries.
+With `--ablate`, leave-one-out re-measurement **names the thieving sibling** when removing it
+significantly restores activation.
 
 **Diagnose (`skill-probe diagnose`):** compares actual runtime activation against intended
 forced-choice routing to classify failures as routing-miss vs description-problem. Intended routing
@@ -294,9 +335,8 @@ is a heuristic, not ground truth, and the README calls that out explicitly.
 **Fix (`skill-probe fix`):** uses the **Bayesian Beta-Binomial** to gate description rewrites on a
 *proven* lift (interleaved before/after, applied only if P(improvement) clears the bar).
 
-**Implemented + unit-tested but NOT yet used by any command:** Benjamini-Hochberg FDR
-(`src/stats.ts`) — reserved for cross-case multiplicity control (a planned enhancement). Don't read
-its presence as the audit using it. (Fisher's exact test is now wired into `context`.)
+Every statistical function in `src/stats.ts` is now wired into a command: Wilson + sequential
+stopping (audit), Fisher's exact + Benjamini-Hochberg (context/ablate), Bayesian Beta-Binomial (fix).
 
 ## Dev
 

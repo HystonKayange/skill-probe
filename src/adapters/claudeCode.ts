@@ -48,6 +48,28 @@ export function parseStream(stdout: string): ParseInfo {
   return { skillFired, trajectory, cost, sawInit, sawAssistant };
 }
 
+/** Decide what a finished (non-timeout) probe means. A probe is a VALID behavioral outcome only
+ * if there is evidence the model actually ran: assistant output AND a nonzero billed cost. A
+ * zero-cost "response" (observed live 2026-07-02: a usage-limit window returned assistant text
+ * with total_cost_usd=0 and no tool_use, for several minutes) means the model never really ran —
+ * counting it as "no skill fired" silently poisons every verdict. It must surface as an infra
+ * error → untrustworthy, never as a behavioral result. */
+export function interpretProbe(info: ParseInfo, stderrText: string): ProbeResult {
+  if (!info.sawAssistant) {
+    return {
+      status: "error", skillFired: null, trajectory: info.trajectory, cost: info.cost,
+      error: stderrText.trim() ? stderrText.trim().slice(-200) : "no assistant output (auth/config/empty response?)",
+    };
+  }
+  if (info.cost === 0) {
+    return {
+      status: "error", skillFired: null, trajectory: info.trajectory, cost: 0,
+      error: "zero-cost response — the model did not actually run (usage limit / degraded CLI state?)",
+    };
+  }
+  return { status: "ok", skillFired: info.skillFired, trajectory: info.trajectory, cost: info.cost };
+}
+
 export const claudeCodeAdapter: RuntimeAdapter = {
   name: "claude-code",
   probe(prompt, { cwd, timeoutMs = 120_000, model }) {
@@ -75,13 +97,7 @@ export const claudeCodeAdapter: RuntimeAdapter = {
             error: `timed out after ${timeoutMs}ms`,
           });
         }
-        if (!info.sawAssistant) {
-          return finish({
-            status: "error", skillFired: null, trajectory: info.trajectory, cost: info.cost,
-            error: err.trim() ? err.trim().slice(-200) : "no assistant output (auth/config/empty response?)",
-          });
-        }
-        finish({ status: "ok", skillFired: info.skillFired, trajectory: info.trajectory, cost: info.cost });
+        finish(interpretProbe(info, err));
       });
     });
   },

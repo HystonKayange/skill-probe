@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, cpSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./types.ts";
-import { reliability, fisherExact2x2 } from "./stats.ts";
+import { reliability, fisherExact2x2, bhAdjust } from "./stats.ts";
 import { measure, infraUntrustworthy, type RunStats } from "./orchestrator.ts";
 import { getAdapter } from "./adapters/index.ts";
 import { listSkills } from "./gen.ts";
@@ -33,17 +33,39 @@ export function buildContextDir(
 type Rel = ReturnType<typeof reliability>;
 interface Condition { stats: RunStats; rel: Rel }
 
+/** One leave-one-out run: the flagged case re-measured with ONE suspect sibling removed from the
+ * library. A significant recovery (BH-corrected Fisher vs the co-loaded run) names that sibling
+ * as the thief — evidence, not the trigger-theft heuristic. */
+export interface AblationResult {
+  removed: string;             // the sibling taken out of the library for this run
+  stolen: number;              // probes this sibling stole in the co-loaded run (the ranking signal)
+  stats: RunStats;
+  rel: Rel;
+  deltaVsCoLoaded: number;     // rel.pHat - coLoaded.pHat (positive = activation recovered)
+  fisherP: number;             // raw p that the recovery is real (ablated vs co-loaded)
+  fisherPAdj: number;          // BH-adjusted across ALL ablation runs in this audit (own family)
+  untrustworthy: boolean;      // infra failures dominated this run
+  culprit: boolean;            // recovery is significant → removing this skill restores activation
+}
+
 export interface ContextCaseResult {
   prompt: string;
   expected: string;            // null-expected (decoy) cases are skipped — nothing to isolate
   isolation: Condition;        // only the expected skill loaded
   coLoaded: Condition;         // the whole library loaded (the real condition the audit uses)
   deltaP: number;              // coLoaded.pHat - isolation.pHat (negative = suppressed under load)
-  fisherP: number;             // p that the isolation-vs-co-loaded difference is real
+  fisherP: number;             // raw p that the isolation-vs-co-loaded difference is real
+  /** Benjamini-Hochberg adjusted p across all trustworthy comparisons in this run — one Fisher
+   * test per case is a FAMILY, and raw p<0.05 over a 40-case library expects ~2 false flags by
+   * chance alone. Interference is decided on THIS value. (1 for untrustworthy cases.) */
+  fisherPAdj: number;
   /** infra failures dominated one side — the comparison is not trustworthy (NOT a behavioral result) */
   untrustworthy: boolean;
-  /** fires reliably alone but drops significantly when the full library is co-loaded */
+  /** fires reliably alone but drops significantly (BH-corrected) when the library is co-loaded */
   interference: boolean;
+  /** leave-one-out runs (only with { ablate: true }, only for interference cases). Empty array =
+   * ablation requested but no named suspect stole probes (suppressed to None — dilution, not theft). */
+  ablation?: AblationResult[];
 }
 
 export interface ContextAuditResult {
@@ -61,13 +83,27 @@ export interface ContextAuditResult {
 
 export interface ContextProgress {
   caseIndex: number; caseTotal: number; prompt: string;
-  condition: "isolation" | "co-loaded"; validN: number; maxK: number;
+  condition: "isolation" | "co-loaded" | "ablation"; validN: number; maxK: number;
+  /** the sibling removed for this run (condition === "ablation" only) */
+  removed?: string;
+}
+
+export interface ContextOpts {
+  /** leave-one-out: for each interference case, re-measure with each suspect sibling removed and
+   * name the thief when activation recovers significantly. */
+  ablate?: boolean;
+  /** max suspect siblings to ablate per flagged case, ranked by probes stolen (default 3) */
+  suspects?: number;
+  onProgress?: (e: ContextProgress) => void;
 }
 
 export async function runContextAudit(
   cfg: Config,
-  onProgress?: (e: ContextProgress) => void,
+  optsOrProgress: ContextOpts | ((e: ContextProgress) => void) = {},
 ): Promise<ContextAuditResult> {
+  const opts: ContextOpts =
+    typeof optsOrProgress === "function" ? { onProgress: optsOrProgress } : optsOrProgress;
+  const onProgress = opts.onProgress;
   const adapter = getAdapter(cfg.runtime);
   const library = listSkills(cfg.cwd);
   const present = new Set(library.map((s) => s.name));
@@ -126,18 +162,81 @@ export async function runContextAudit(
     // if infra failures dominated either side, the comparison isn't a behavioral result at all —
     // it must never read as "no interference / pass" just because fisherP defaulted to 1.
     const untrustworthy = infraUntrustworthy(iso) || infraUntrustworthy(co);
-    const interference =
-      !untrustworthy &&
-      isoRel.pHat >= cfg.threshold &&  // fires reliably alone
-      deltaP < 0 &&                    // and drops when co-loaded
-      fisherP < 0.05;                  // and the drop is statistically real
 
+    // interference is decided AFTER the loop, once the whole family of comparisons is known
+    // (Benjamini-Hochberg) — placeholders here.
     measured.push({
       prompt: c.prompt, expected,
       isolation: { stats: iso, rel: isoRel },
       coLoaded: { stats: co, rel: coRel },
-      deltaP, fisherP, untrustworthy, interference,
+      deltaP, fisherP, fisherPAdj: 1, untrustworthy, interference: false,
     });
+  }
+
+  // One Fisher test per case = a family of comparisons: correct across the trustworthy ones so a
+  // big library doesn't buy false interference flags by chance (raw p<0.05 × 40 cases ≈ 2 flukes).
+  const trustworthy = measured.filter((m) => !m.untrustworthy);
+  const adj = bhAdjust(trustworthy.map((m) => m.fisherP));
+  trustworthy.forEach((m, j) => { m.fisherPAdj = adj[j]!; });
+  for (const m of measured) {
+    m.interference =
+      !m.untrustworthy &&
+      m.isolation.rel.pHat >= cfg.threshold &&  // fires reliably alone
+      m.deltaP < 0 &&                           // and drops when co-loaded
+      m.fisherPAdj < 0.05;                      // and the drop survives BH correction
+  }
+
+  // leave-one-out ablation: for each flagged case, re-measure with each suspect sibling removed.
+  // Suspects are ranked by the probes they actually stole in the co-loaded run — evidence-guided,
+  // not a sweep of the whole library. Recovery is Fisher-tested against the co-loaded run and
+  // BH-corrected across all ablation runs (their own family). A significant recovery NAMES the
+  // thief; no suspects in the outcome distribution means the drop was dilution, not theft.
+  if (opts.ablate) {
+    const libraryNames = library.map((s) => s.name);
+    const flagged = measured.filter((m) => m.interference);
+    const cap = opts.suspects ?? 3;
+    const allRuns: AblationResult[] = [];
+    for (let fi = 0; fi < flagged.length; fi++) {
+      const m = flagged[fi]!;
+      const suspects = Object.entries(m.coLoaded.stats.dist)
+        .filter(([name]) => name !== m.expected && name !== "None")
+        .sort((x, y) => y[1] - x[1])
+        .slice(0, cap);
+      m.ablation = [];
+      for (const [suspect, stolen] of suspects) {
+        const ctx = buildContextDir(cfg.cwd, libraryNames.filter((n) => n !== suspect));
+        let st: RunStats;
+        try {
+          st = await measure(adapter, m.prompt, m.expected, {
+            cwd: ctx.cwd, ...common,
+            ...(onProgress ? { onProbe: (validN, maxK) => onProgress({ caseIndex: fi + 1, caseTotal: flagged.length, prompt: m.prompt, condition: "ablation", removed: suspect, validN, maxK }) } : {}),
+          });
+        } finally {
+          ctx.cleanup();
+        }
+        totalCost += st.totalCost;
+        const rel = reliability(st.hits, st.n, cfg.conf);
+        const co = m.coLoaded.stats;
+        const fisherP = (st.n > 0 && co.n > 0)
+          ? fisherExact2x2(st.hits, st.n - st.hits, co.hits, co.n - co.hits)
+          : 1;
+        const abl: AblationResult = {
+          removed: suspect, stolen, stats: st, rel,
+          deltaVsCoLoaded: rel.pHat - m.coLoaded.rel.pHat,
+          fisherP, fisherPAdj: 1,
+          untrustworthy: infraUntrustworthy(st),
+          culprit: false,
+        };
+        m.ablation.push(abl);
+        allRuns.push(abl);
+      }
+    }
+    const ablFamily = allRuns.filter((r) => !r.untrustworthy);
+    const ablAdj = bhAdjust(ablFamily.map((r) => r.fisherP));
+    ablFamily.forEach((r, j) => { r.fisherPAdj = ablAdj[j]!; });
+    for (const r of allRuns) {
+      r.culprit = !r.untrustworthy && r.deltaVsCoLoaded > 0 && r.fisherPAdj < 0.05;
+    }
   }
 
   // precedence mirrors the audit: a real behavioral signal (interference, exit 1) outranks an

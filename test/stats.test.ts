@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   wilsonInterval, sequentialDecision, fisherExact2x2,
-  probImprovement, benjaminiHochberg,
+  probImprovement, benjaminiHochberg, bhAdjust,
 } from "../src/stats.ts";
 
 const approx = (a: number, b: number, tol = 1e-3) => Math.abs(a - b) < tol;
@@ -40,6 +40,30 @@ test("bayesian prob improvement behaves", () => {
   r = probImprovement(5, 10, 5, 10);
   assert.ok(r.pImprove > 0.4 && r.pImprove < 0.6, JSON.stringify(r));
   assert.ok(r.deltaCi[0] < 0 && r.deltaCi[1] > 0);
+});
+
+test("bhAdjust: adjusted p agrees with BH decisions and never shrinks p", () => {
+  // m=1: adjustment is the identity
+  assert.deepEqual(bhAdjust([0.03]), [0.03]);
+  assert.deepEqual(bhAdjust([]), []);
+  // textbook: [0.001, 0.6, 0.7, 0.8, 0.9] -> adj[0] = 0.001*5/1 = 0.005
+  const adj = bhAdjust([0.001, 0.6, 0.7, 0.8, 0.9]);
+  assert.ok(approx(adj[0]!, 0.005, 1e-9), `adj[0]=${adj[0]}`);
+  // consistency: adj <= q  ⟺  benjaminiHochberg rejects at q, on a mixed family
+  for (const pvals of [
+    [0.01, 0.02, 0.03, 0.04, 0.05],
+    [0.04, 0.7, 0.8, 0.9, 0.95],
+    [0.001, 0.03, 0.04, 0.6, 0.9],
+  ]) {
+    const rejected = benjaminiHochberg(pvals, 0.05);
+    const a = bhAdjust(pvals);
+    pvals.forEach((p, i) => {
+      assert.equal(a[i]! <= 0.05, rejected[i],
+        `mismatch at i=${i}: p=${p} adj=${a[i]} rejected=${rejected[i]}`);
+      assert.ok(a[i]! >= p - 1e-12, "adjusted p never below raw p");
+      assert.ok(a[i]! <= 1, "adjusted p capped at 1");
+    });
+  }
 });
 
 test("benjamini-hochberg FDR", () => {
