@@ -14,11 +14,11 @@ inputs:
     required: false
     default: "audit"
   args:
-    description: "Extra CLI flags, e.g. '--ablate' or '--baseline baselines/main.json'"
+    description: "Extra CLI flags, e.g. '--ablate' or '--baseline baselines/main.json --max-cost 2'"
     required: false
     default: ""
   version:
-    description: "skill-probe version to install"
+    description: "skill-probe version to install (pin one for reproducible gates)"
     required: false
     default: "latest"
   runtime-package:
@@ -27,20 +27,55 @@ inputs:
       Default installs Claude Code; set to '' if your runner already has a runtime installed.
     required: false
     default: "@anthropic-ai/claude-code"
+  summary:
+    description: "Also write the report to the job summary (true/false)"
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
   steps:
+    # Inputs reach the shell ONLY through env vars — never interpolated into the script text, so a
+    # workflow that feeds them from untrusted data (a PR title, a branch name) can't inject commands.
     - name: Install skill-probe (and the runtime CLI)
       shell: bash
+      env:
+        SP_VERSION: ${{ inputs.version }}
+        SP_RUNTIME_PACKAGE: ${{ inputs.runtime-package }}
       run: |
-        npm install -g "skill-probe@${{ inputs.version }}"
-        if [ -n "${{ inputs.runtime-package }}" ]; then
-          npm install -g "${{ inputs.runtime-package }}"
+        set -euo pipefail
+        npm install -g "skill-probe@${SP_VERSION}"
+        if [ -n "${SP_RUNTIME_PACKAGE}" ]; then
+          npm install -g "${SP_RUNTIME_PACKAGE}"
         fi
     - name: Run skill-probe
       shell: bash
+      env:
+        SP_COMMAND: ${{ inputs.command }}
+        SP_CONFIG: ${{ inputs.config }}
+        SP_ARGS: ${{ inputs.args }}
+        SP_SUMMARY: ${{ inputs.summary }}
       run: |
-        CMD="${{ inputs.command }}"
-        [ "$CMD" = "audit" ] && CMD=""
-        skill-probe $CMD --config "${{ inputs.config }}" --quiet --no-cost ${{ inputs.args }}
+        set -uo pipefail
+        case "${SP_COMMAND}" in
+          audit) cmd=() ;;
+          context|diagnose|doctor) cmd=("${SP_COMMAND}") ;;
+          *) echo "::error::unknown command '${SP_COMMAND}' (expected audit, context, diagnose or doctor)"; exit 2 ;;
+        esac
+        # SP_ARGS is deliberately word-split into separate flags — across ALL lines (a YAML `|`
+        # block puts flags on several lines); globbing is off so nothing expands
+        set -f
+        read -r -d '' -a extra <<< "${SP_ARGS}" || true
+        set +f
+        out="$(mktemp)"
+        skill-probe ${cmd[@]+"${cmd[@]}"} --config "${SP_CONFIG}" --quiet --no-cost ${extra[@]+"${extra[@]}"} | tee "${out}"
+        code=${PIPESTATUS[0]}
+        if [ "${SP_SUMMARY}" = "true" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          {
+            echo "### skill-probe ${SP_COMMAND} (exit ${code})"
+            echo '```'
+            cat "${out}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+        fi
+        exit "${code}"

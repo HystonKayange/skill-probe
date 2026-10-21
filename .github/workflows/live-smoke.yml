@@ -1,0 +1,54 @@
+# Real probes against the real runtime. Unit tests pin the parsers to captured output, but only a
+# live run notices when Claude Code changes a flag, its stream-json shape, or what it reports at
+# session start. Costs real tokens (~15-20 probes), so it runs weekly and on demand — never per PR.
+# Needs the ANTHROPIC_API_KEY repository secret; without it the job is skipped with a warning.
+name: live-smoke
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Skip without an API key
+        if: env.ANTHROPIC_API_KEY == ''
+        run: echo "::warning::ANTHROPIC_API_KEY secret is not set — live smoke skipped"
+      - uses: actions/checkout@v4
+        if: env.ANTHROPIC_API_KEY != ''
+      - uses: actions/setup-node@v4
+        if: env.ANTHROPIC_API_KEY != ''
+        with:
+          node-version: "22"
+          check-latest: true
+      - name: Install deps + the latest Claude Code
+        if: env.ANTHROPIC_API_KEY != ''
+        run: |
+          npm ci
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+      - name: doctor — auth, every library skill loads, built-ins detected
+        if: env.ANTHROPIC_API_KEY != ''
+        run: node src/cli.ts doctor --config examples/audit.config.json
+      - name: audit — probes run, nothing reads as an infra error, environment captured
+        if: env.ANTHROPIC_API_KEY != ''
+        run: |
+          set +e
+          node src/cli.ts --config examples/audit.config.json --k 3 --max-cost 1 --json > audit.json
+          echo "audit exit $?"
+          set -e
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync("audit.json", "utf8"));
+            const errs = r.cases.filter((c) => c.verdict === "error");
+            if (errs.length) { console.error("infra errors:", errs.map((c) => c.stats.lastError)); process.exit(1); }
+            const env = r.manifest.environment ?? {};
+            if (!env.runtimeVersion || !env.resolvedModel) { console.error("runtime environment not captured", env); process.exit(1); }
+            if (r.cases.some((c) => c.notLoaded)) { console.error("a library skill was not loaded"); process.exit(1); }
+            console.log("live smoke ok:", JSON.stringify(env));
+          '
