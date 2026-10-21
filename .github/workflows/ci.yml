@@ -26,7 +26,16 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - name: build + smoke the compiled CLI (what npm users run)
+        # no runtime CLI on the runner (doctor would rightly fail) — check the build itself
         run: |
           npm run build
           node dist/cli.js --version
-          node dist/cli.js doctor --cwd examples/sample-skills --skip-probe
+          node dist/cli.js --help > /dev/null
+          node --input-type=module -e '
+            import { readdirSync } from "node:fs";
+            for (const dir of ["dist", "dist/adapters"])
+              for (const f of readdirSync(dir))
+                if (f.endsWith(".js") && f !== "cli.js") await import(`./${dir}/${f}`);
+            console.log("all compiled modules load");'
+          set +e; node dist/cli.js --config examples/audit.config.json --runtime nope > out.txt 2>&1; code=$?; set -e
+          test "$code" = 2 && grep -q "unknown runtime 'nope'" out.txt
