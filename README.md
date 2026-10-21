@@ -21,6 +21,14 @@ Complements static linters like `skill-audit` (security/quality) — this is **b
 > authenticated: **`claude`** (logged in) for `runtime: claude-code`, or **`opencode`** for
 > `runtime: opencode`. `gen`/`fix`/`diagnose` use `ANTHROPIC_API_KEY` if set, otherwise the local `claude` CLI.
 > Codex/Gemini runtimes aren't supported yet (their traces don't expose which skill fired).
+>
+> **Claude Code probes are hermetic by default.** Your personal Claude Code config — user plugins, synced skills,
+> user settings, MCP servers — is kept out of every probe, so a run on your laptop measures the same
+> thing as a run in CI (measured: a 2-skill project loaded 32 skills with personal config, 21
+> without). Claude Code's own built-in skills ship with the runtime, so they stay — and every report
+> lists them, because they compete for triggers too. Pass `--user-config` to measure your personal
+> environment instead. (`opencode run` always loads its global config; reports on OpenCode runs say
+> so rather than claiming isolation.)
 
 The workflow:
 
@@ -41,8 +49,10 @@ doctor → gen → audit → context → diagnose → fix
 
 - Skill activation is stochastic: the same prompt can produce different skill-routing outcomes.
 - A single run lies (we measured the same prompt at 0/5 one batch, 2/3 the next).
-- skill-probe runs each prompt **k times**, reports a **Wilson 95% CI**, stops early when the
-  result is statistically decided, and flags **trigger-theft** (a sibling stealing a trigger).
+- skill-probe runs each prompt up to **k times**, reports a **Wilson 95% CI**, stops early when the
+  verdict is statistically decided — with an **exact error guarantee** that holds however early it
+  stops (see [How verdicts are decided](#how-verdicts-are-decided)) — and flags **trigger-theft** (a
+  sibling stealing a trigger).
 
 ## Install
 
@@ -68,16 +78,21 @@ PASS  config parsed: probe.config.json
 PASS  found .claude/skills/ with 4 skills
 PASS  expected skills all exist
 PASS  claude CLI found
-PASS  claude-code probe succeeded (CLI is authenticated)
-WARN  threshold 90% with k=10 cannot certify a pass — need ~k=35
-FAIL  skill "greeter" missing description:
+PASS  claude-code probe succeeded (CLI is authenticated) — claude 2.1.305, default model claude-opus-5-5
+PASS  the runtime loads all 4 library skills
+WARN  skill "debug" has the same name as a claude-code built-in skill — the two compete for the same trigger
+INFO  19 claude-code built-in skill(s) load alongside your library in every probe (deep-research, …)
+WARN  threshold 90% with k=10 cannot certify a pass even on a perfect run — need k≥29
+FAIL  skill "greeter" missing description: (in a --- frontmatter block)
 ```
 
 It checks: Node version, `.claude/skills/` exists, every skill has a `SKILL.md` with `name:` +
-`description:`, names match folders, the config parses, every `expected` skill exists, the
-threshold/k are statistically achievable, the runtime CLI is installed, and a harmless live probe
-authenticates. Exit `0` healthy · `1` warnings only · `2` hard failures. Use `--skip-probe` to skip
-the live (costing) auth check.
+`description:` (single-line or multi-line YAML), names match folders, the config parses, every
+`expected` skill exists, the threshold/k are statistically achievable, the runtime CLI is installed,
+a harmless live probe authenticates, **the runtime actually loaded every library skill** (a
+`SKILL.md` it rejects can never fire), and no library skill shares a name with a runtime built-in.
+Exit `0` healthy · `1` warnings only · `2` hard failures. Use `--skip-probe` to skip the two live
+(costing) probes.
 
 ## Generate a config (`skill-probe gen`)
 
@@ -123,6 +138,7 @@ Config (`skill-probe.config.json`):
 Output:
 ```
 skill-probe — runtime: claude-code  model: (runtime default)  threshold: 70%
+  runtime 2.1.305 · model resolved to claude-opus-5-5 · 19 skill(s) outside the library also loaded (batch, claude-api, code-review, …) · hermetic (personal runtime config excluded)
 
   PASS          expect=commit-writer  | write a commit message
         reliability 100% [72%, 100%] k=10
@@ -130,7 +146,7 @@ skill-probe — runtime: claude-code  model: (runtime default)  threshold: 70%
   FAIL          expect=pr-describer  | write a pull request description
         reliability 20% [6%, 51%] k=10
         outcomes: None×8, commit-writer×2
-        ⚠ trigger-theft by: commit-writer
+        ⚠ trigger-theft by: commit-writer 2/10
   PASS          expect=(none)  | what's the weather?
         reliability 100% [72%, 100%] k=10
         outcomes: None×10
@@ -141,28 +157,62 @@ Result: 2 pass / 1 fail / 0 inconclusive / 0 error  |  exit 1  |  cost $0.18
 - `cwd` (relative paths resolve against the **config file's** directory) is a project dir
   containing `.claude/skills/`.
 - `expected: null` = a decoy that should fire nothing.
-- Exit code: `0` all pass, `1` a behavioral fail / trigger-theft, `2` inconclusive or an
-  infrastructure error (runtime down → never a silent pass).
+- Exit code: `0` all pass, `1` a behavioral fail, `2` inconclusive or an infrastructure error
+  (runtime down → never a silent pass).
+- **Trigger-theft** (another skill fired) is a warning with counts. On its own, one stray firing out
+  of k isn't evidence of a problem — the verdict comes from the reliability test. Add
+  `--fail-on-theft` (or `"failOnTheft": true`) for zero tolerance.
+- Unknown config keys are an error (a typo'd `"treshold"` would otherwise silently use the default).
 
 **Output options:** a live `probing [2/3] …` progress line prints to stderr while it runs (use
 `--quiet` to silence it). `--markdown` emits a table you can paste into a PR/README; `--json`
 for machine output; `--no-cost` hides the cost line (handy on a Claude subscription, where the
 dollar figure is just an estimate, not a charge).
 
+**Run options** (every probing command):
+
+| Flag | Config key | What it does |
+|---|---|---|
+| `--concurrency <n>` | — | probe n cases in parallel (default 1 — mind your rate limits) |
+| `--max-cost <usd>` | — | stop runtime probes once they've spent this much; cases cut short are `inconclusive` (`error` if never started), never `pass`. LLM calls (`gen`, `fix`'s rewrite, `diagnose`'s forced choice) aren't counted |
+| `--max-turns <n>` | `maxTurns` | agent turns per probe (default 1). If the report says probes "called another tool first", try 2 |
+| `--timeout <sec>` | `timeout` | per-probe timeout (default 120) |
+| `--user-config` | `userConfig` | load your personal runtime config into probes (not reproducible in CI) |
+
+Interrupting a run (Ctrl-C) kills in-flight probes and removes every sandbox it created.
+
 **Cross-runtime comparison must pin the model.** A skill can fire on one runtime and not another
 partly because of the *model*, not the runtime. Always set `model` (recorded in the report) so a
 Claude Code vs OpenCode comparison is fair — otherwise you're comparing two confounded variables.
 
-**Two modes** — because confidence intervals are wide at small k:
-- **Smoke (default):** `threshold 0.7, k 10` — a clean run certifies; cheap; good for CI.
-- **Certify:** a strict bar needs more runs. To certify **≥0.9** you need **~k=35**; when a
-  case is inconclusive the report prints the exact k for your threshold. Don't set `threshold
-  0.9, k 10` and expect a pass — that's statistically impossible and the tool will say so.
+**Two modes** — because small samples can't certify much:
+- **Smoke (default):** `threshold 0.7, k 10` — a clean 10/10 certifies; cheap; good for CI.
+- **Certify:** a strict bar needs more runs. To certify **≥0.9** a perfect run needs **k≥29** (more
+  if some probes miss); when a case is inconclusive the report prints the k for your threshold.
+  Don't set `threshold 0.9, k 10` and expect a pass — that's statistically impossible, and
+  `doctor` says so before you spend anything.
+
+### How verdicts are decided
+
+A naive "stop as soon as the confidence interval clears the threshold" rule peeks after every probe,
+and each peek is another chance to be wrong. Measured on that rule at k=35, a skill sitting exactly
+at the threshold was wrongly passed **9%** and wrongly failed **18%** of the time — against a nominal
+2.5%. skill-probe instead decides with an **exact group-sequential test** (Haybittle-Peto style:
+strict interim looks so only clear-cut cases stop early, the remaining error budget spent at the
+final look), calibrated by enumerating every possible probe path. The guarantee, for any k:
+
+- **PASS** — if the skill's true reliability is at or below the threshold, the chance of this verdict is ≤ `1 − conf`
+- **FAIL** — if it's at or above the threshold, the chance of this verdict is ≤ `1 − conf`
+
+Stopping early, or ending short because of infrastructure errors, keeps the guarantee. The test suite
+re-derives these error rates by brute-force enumeration over a grid of k, thresholds and confidence
+levels — and shows the old rule failing the same check. The printed interval is the usual two-sided
+Wilson CI, for reading; the verdict comes from the test.
 
 ## CI usage
 
 skill-probe exits non-zero on a real problem, so it drops straight into a pipeline. Exit codes:
-**`0`** all pass · **`1`** a behavioral fail / trigger-theft / interference / regression · **`2`**
+**`0`** all pass · **`1`** a behavioral fail / interference / regression (trigger-theft only with `--fail-on-theft`) · **`2`**
 inconclusive or an infrastructure error — so a runtime outage *fails* the build instead of silently
 passing. Add `--json` to archive the full result (it includes a **run manifest**: tool version,
 model, date, config hash — so two runs are comparable and a report is citable).
@@ -216,9 +266,16 @@ jobs:
 
 The action installs skill-probe plus the runtime CLI (Claude Code by default; set
 `runtime-package: ""` if your runner already has one) and runs the command. `command:` selects
-`audit` (default), `context`, `diagnose`, or `doctor`; `args:` passes extra flags like `--ablate`.
+`audit` (default), `context`, `diagnose`, or `doctor`; `args:` passes extra flags like `--ablate`
+or `--max-cost 2`; `version:` pins skill-probe (recommended, so a gate doesn't change under you);
+the report is also written to the job summary (`summary: "false"` to turn that off). Inputs reach
+the shell only through environment variables, so feeding them from PR data can't inject commands.
 The runtime authenticates via `ANTHROPIC_API_KEY` — headless probes each cost real tokens, so
-smoke settings (`k: 10`, few cases) are the sweet spot for per-PR gating.
+smoke settings (`k: 10`, few cases, a `--max-cost` cap) are the sweet spot for per-PR gating.
+
+The baseline records what the runtime actually ran with — its version, the model it resolved to,
+and the skills it loaded besides yours — and the gate warns when any of those drifted (a Claude Code
+upgrade can add a built-in skill that steals a trigger; that's worth knowing before reading Δ).
 
 ## Activation rate by context (`skill-probe context`)
 
@@ -250,6 +307,14 @@ skill-probe context — runtime: claude-code  model: (runtime default)  threshol
 
 Result: 1 interference / 3 measured  |  exit 1
 ```
+
+Every condition — isolation, co-loaded, and each `--ablate` run — executes in an **identical
+sandbox**: the skill subset plus your project's `CLAUDE.md` / `AGENTS.md` / `.claude/CLAUDE.md`, so
+the *only* difference between conditions is which skills are present. (Comparing a sandbox against
+your real project dir would blame the library for anything your `CLAUDE.md` does — and every
+ablation would "recover" and name an innocent sibling.) When the runtime reports what it loaded,
+each condition is checked against what it should contain; a mismatch makes that comparison an error,
+not a result.
 
 This is the "fires in isolation, fails under load X" case the aggregate rate hides. Decoy cases
 (`expected: null`) are skipped — there's no single skill to isolate; an `expected` skill that isn't
@@ -285,9 +350,11 @@ Result: 1 interference / 1 measured  |  thieves named: welcomer  |  exit 1
 
 (That's a real run.) Honest edge cases: if the co-loaded probes were suppressed to **None** —
 nothing stole them, the skill just stops firing under load — there's no suspect to remove, and the
-report says *"dilution, not theft; nothing to ablate"* instead of guessing. If no single removal
-recovers activation, it says so ("interference may be combinatorial") rather than naming an
-innocent sibling.
+report says *"dilution, not theft; nothing to ablate"* instead of guessing. If the thief is
+**outside your library** — e.g. a Claude Code built-in like `code-review` — it can't be removed, and
+the report says so and tells you to narrow or rename your skill. If no single removal recovers
+activation, it says so ("interference may be combinatorial") rather than naming an innocent
+sibling.
 
 ## Why a skill fails (`skill-probe diagnose`)
 
@@ -340,11 +407,15 @@ ANTHROPIC_API_KEY=sk-ant-... \
 ```
 
 It (1) LLM-rewrites the description, told the sibling skills so it won't steal their triggers;
-(2) runs an **interleaved** before/after (old desc → probe → new desc → probe, paired, to control
-for drift); (3) computes the **Bayesian** P(improvement) + a credible interval on the change; and
-(4) **applies the rewrite only if** `P(improvement) ≥ --apply-threshold` (default 0.9) **and** the
-effect is positive — otherwise reverts. When applied, the original is snapshotted to a timestamped
-`SKILL.md.bak.<timestamp>` (no backup is left behind on a revert).
+(2) runs a **paired** before/after in two identical sandboxes of your library — one with the old
+description, one with the new — probing both at the same moment so drift hits both arms equally;
+(3) computes the **Bayesian** P(improvement) + a credible interval on the change; and (4) **writes
+the rewrite only if** `P(improvement) ≥ --apply-threshold` (default 0.9) **and** the effect is
+positive. Your real `SKILL.md` is never touched during the experiment — an interrupted run can't
+leave it half-edited — and if it changed on disk while `fix` ran, `fix` refuses to overwrite it.
+When applied, the original is snapshotted to a timestamped `SKILL.md.bak.<timestamp>` first.
+Multi-line (`>-`/`|`) descriptions are read and rewritten correctly; the rest of the file is
+preserved byte for byte.
 
 ```
 before: 0% [0%, 49%]   after: 100% [51%, 100%]   (4 paired runs)
@@ -368,12 +439,15 @@ probe.
 **Gen (`skill-probe gen`):** drafts a reviewable probe config from existing skills, including
 should-fire prompts, near-misses, and decoys.
 
-**Audit (`skill-probe`):** Wilson confidence intervals + sequential stopping + four-state verdict
-(pass / fail / inconclusive / **error**), across two runtimes (Claude Code, OpenCode).
+**Audit (`skill-probe`):** Wilson confidence intervals + exact group-sequential verdicts (error
+bounded by `1 − conf` however early a run stops) + four-state verdict (pass / fail / inconclusive /
+**error**), across two runtimes (Claude Code, OpenCode). Hermetic Claude Code probes; the runtime's own report
+of what it loaded is recorded and checked.
 Infrastructure failures (timeout / auth / crash / empty output / a zero-cost response where the
 model never actually ran, e.g. a usage-limit window) are reported as `error`, never as a
-behavioral pass/fail — a decoy can't falsely pass because the runtime was down. Every run carries
-a **manifest** (version, model, date, config hash); `--save-baseline` / `--baseline` turn audits
+behavioral pass/fail — a decoy can't falsely pass because the runtime was down (OpenCode included:
+an error event is an error, not "no skill fired"). Every run carries a **manifest** (version, model,
+date, config hash, and the environment the runtime reported); `--save-baseline` / `--baseline` turn audits
 into a CI regression gate (Fisher + BH — noise passes, real drops fail), and a **GitHub Action**
 (`HystonKayange/skill-probe@main`) wraps the whole thing for per-PR gating.
 
@@ -390,8 +464,9 @@ is a heuristic, not ground truth, and the README calls that out explicitly.
 **Fix (`skill-probe fix`):** uses the **Bayesian Beta-Binomial** to gate description rewrites on a
 *proven* lift (interleaved before/after, applied only if P(improvement) clears the bar).
 
-Every statistical function in `src/stats.ts` is now wired into a command: Wilson + sequential
-stopping (audit), Fisher's exact + Benjamini-Hochberg (context/ablate), Bayesian Beta-Binomial (fix).
+Every statistical function in `src/stats.ts` is wired into a command: Wilson intervals + the exact
+sequential plan (audit/context/diagnose), Fisher's exact + Benjamini-Hochberg (context/ablate,
+baseline), Bayesian Beta-Binomial (fix).
 
 ## Dev
 
@@ -399,4 +474,9 @@ stopping (audit), Fisher's exact + Benjamini-Hochberg (context/ablate), Bayesian
 node --test test/*.test.ts   # run tests (zero deps; Node >= 22.18 strips types)
 node src/cli.ts --help
 npm run typecheck            # tsc --noEmit (needs `npm i`)
+npm run build                # compile to dist/ (what the npm package runs)
 ```
+
+`test/fixtures/` holds real, sanitized runtime output (Claude Code stream-json, an OpenCode error
+event) so the parsers are pinned to what the CLIs actually emit. The `live-smoke` workflow runs real
+probes weekly (needs the `ANTHROPIC_API_KEY` secret) to catch runtime CLI changes the fixtures can't.
