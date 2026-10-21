@@ -1,0 +1,109 @@
+# Publishes to npm with trusted publishing (OIDC): no npm token is stored anywhere, no 2FA prompt,
+# and npm attaches a provenance attestation linking the package to this exact workflow run.
+#
+# Runs when a version tag (vX.Y.Z) is pushed, or manually for an existing tag:
+#   gh workflow run release.yml -f tag=v0.10.0
+#
+# One-time setup on npmjs.com → skill-probe → Settings → Trusted Publisher → GitHub Actions:
+#   Organization or user: HystonKayange · Repository: skill-probe · Workflow filename: release.yml
+#   (leave Environment empty)
+name: release
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to publish, e.g. v0.10.0"
+        required: true
+
+permissions:
+  contents: read
+
+# never run two releases at once; never cancel one halfway through a publish
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token for npm trusted publishing + provenance
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: npm with trusted publishing support (>= 11.5.1)
+        run: |
+          npm install -g "npm@^11.5.1"
+          npm --version
+      - name: Check the tag is a release of main whose version matches package.json
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          if [ "${TAG}" != "v${version}" ]; then
+            echo "::error::tag ${TAG} doesn't match package.json version ${version}"
+            exit 1
+          fi
+          git fetch -q origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::${TAG} is not on main — only releases of main are published"
+            exit 1
+          fi
+          if npm view "skill-probe@${version}" version > /dev/null 2>&1; then
+            echo "::notice::skill-probe@${version} is already on npm — skipping the publish"
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Publish to npm (prepublishOnly builds and runs the full test suite first)
+        if: steps.meta.outputs.published != 'true'
+        run: npm publish
+      - name: Confirm the registry serves it
+        run: |
+          for i in 1 2 3 4 5 6; do
+            if npm view "skill-probe@${{ steps.meta.outputs.version }}" version --prefer-online; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::skill-probe@${{ steps.meta.outputs.version }} isn't visible on the registry"
+          exit 1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.publish.outputs.tag }}
+      VERSION: ${{ needs.publish.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Create the GitHub release from CHANGELOG.md (unless one exists)
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            echo "release ${TAG} already exists — leaving it alone"
+            exit 0
+          fi
+          # the "## X.Y.Z — date" section of CHANGELOG.md, without its heading
+          awk -v ver="${VERSION}" '/^## /{p = ($2 == ver); next} p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See [CHANGELOG.md](CHANGELOG.md)." > notes.md
+          gh release create "${TAG}" --title "${TAG}" --notes-file notes.md --verify-tag
