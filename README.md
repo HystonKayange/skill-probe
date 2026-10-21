@@ -480,3 +480,9 @@ npm run build                # compile to dist/ (what the npm package runs)
 `test/fixtures/` holds real, sanitized runtime output (Claude Code stream-json, an OpenCode error
 event) so the parsers are pinned to what the CLIs actually emit. The `live-smoke` workflow runs real
 probes weekly (needs the `ANTHROPIC_API_KEY` secret) to catch runtime CLI changes the fixtures can't.
+
+**Releasing:** bump `version` in `package.json` (+ lockfile), date the `CHANGELOG.md` section as
+`## X.Y.Z — YYYY-MM-DD`, commit, then push a `vX.Y.Z` tag. The `release` workflow checks the tag
+matches `package.json` and is on `main`, publishes to npm via trusted publishing (no token, with a
+provenance attestation), and creates the GitHub release from the CHANGELOG section. To publish an
+existing tag: `gh workflow run release.yml -f tag=vX.Y.Z`.

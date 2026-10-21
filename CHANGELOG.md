@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Releases publish from GitHub Actions with npm trusted publishing (OIDC, provenance attestation,
+  no stored npm token) when a `vX.Y.Z` tag is pushed.
+
 ## 0.10.0 — 2026-10-21
 
 Correctness hardening: several measurements could come out confidently wrong. Each item below was
