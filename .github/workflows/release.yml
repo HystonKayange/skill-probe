@@ -75,12 +75,20 @@ jobs:
         if: steps.meta.outputs.published != 'true'
         run: npm publish
       - name: Confirm the registry serves it
+        # npm processes new versions asynchronously ("may take a few minutes to become available";
+        # v0.10.0 took ~6 min), so poll for up to 15 minutes before calling it a failure
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          for i in 1 2 3 4 5 6; do
-            if npm view "skill-probe@${{ steps.meta.outputs.version }}" version --prefer-online; then exit 0; fi
-            sleep 10
+          for i in $(seq 1 30); do
+            if npm view "skill-probe@${VERSION}" version --prefer-online > /dev/null 2>&1; then
+              echo "skill-probe@${VERSION} is live on npm"
+              exit 0
+            fi
+            echo "waiting for npm to finish processing skill-probe@${VERSION} (${i}/30)…"
+            sleep 30
           done
-          echo "::error::skill-probe@${{ steps.meta.outputs.version }} isn't visible on the registry"
+          echo "::error::skill-probe@${VERSION} still isn't visible on the registry after 15 minutes"
           exit 1
 
   github-release:
