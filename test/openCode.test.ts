@@ -53,3 +53,44 @@ test("no skill fired -> null", () => {
   assert.equal(r.skillFired, null);
   assert.deepEqual(r.trajectory, ["read"]);
 });
+
+test("REAL captured error event (opencode 1.17.9) is an infra error — never a behavioral None", async () => {
+  // regression: this single {"type":"error"} event used to parse as a valid run where no skill
+  // fired, so a decoy case PASSED while the runtime was completely broken
+  const { readFileSync } = await import("node:fs");
+  const { interpretOpenCode } = await import("../src/adapters/openCode.ts");
+  const raw = readFileSync(new URL("./fixtures/opencode-1.17.9-error.jsonl", import.meta.url), "utf8");
+  const r = interpretOpenCode(raw, "");
+  assert.equal(r.status, "error");
+  assert.match(r.error!, /1\.18\.0 or newer is required/);
+});
+
+test("output without any model step is an infra error", async () => {
+  const { interpretOpenCode } = await import("../src/adapters/openCode.ts");
+  const r = interpretOpenCode(JSON.stringify({ type: "session.created", id: "x" }) + "\n", "");
+  assert.equal(r.status, "error");
+  assert.match(r.error!, /did not actually run/);
+});
+
+test("a real step with no skill is a valid behavioral None", async () => {
+  const { interpretOpenCode } = await import("../src/adapters/openCode.ts");
+  const events = [
+    { type: "step_start", part: { type: "step-start" } },
+    { type: "text", part: { type: "text", text: "Paris" } },
+    { type: "step_finish", part: { type: "step-finish", cost: 0.001 } },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const r = interpretOpenCode(events, "");
+  assert.equal(r.status, "ok");
+  assert.equal(r.skillFired, null);
+});
+
+test("a failed tool part (state.status error) is NOT mistaken for a run error", async () => {
+  const { interpretOpenCode } = await import("../src/adapters/openCode.ts");
+  const events = [
+    { type: "step_start", part: { type: "step-start" } },
+    { type: "tool_use", part: { type: "tool", tool: "skill", state: { status: "error", input: { name: "x" } } } },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const r = interpretOpenCode(events, "");
+  assert.equal(r.status, "ok");
+  assert.equal(r.skillFired, "x");
+});

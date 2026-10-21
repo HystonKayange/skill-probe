@@ -143,3 +143,39 @@ test("--skip-probe avoids the live call but still validates the rest", async () 
     assert.equal(r.exitCode, 0);
   } finally { rmSync(src, { recursive: true, force: true }); }
 });
+
+test("a multi-line (block scalar) description is valid — no false warning", async () => {
+  const root = mkdtempSync(join(tmpdir(), "skill-probe-doc-ml-"));
+  mkdirSync(join(root, ".claude", "skills", "greeter"), { recursive: true });
+  writeFileSync(join(root, ".claude", "skills", "greeter", "SKILL.md"),
+    "---\nname: greeter\ndescription: >-\n  say hi to\n  people\n---\n");
+  try {
+    const r = await runDoctor({ cwd: root }, okDeps);
+    assert.equal(r.exitCode, 0, JSON.stringify(r.checks, null, 2));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("live probe: a skill the runtime didn't load is a FAIL; built-in name clashes WARN", async () => {
+  const src = makeProject([["greeter", "greeter", "say hi"], ["debug", "debug", "debug my code"], ["broken", "broken", "x"]]);
+  const builtins = ["debug", "verify", "run"];
+  const deps: DoctorDeps = {
+    cliInstalled: () => true,
+    // the real project loads greeter + debug (+ built-ins) but rejected "broken"; an empty
+    // sandbox shows the built-ins alone
+    probe: async (_rt, _p, opts): Promise<ProbeResult> => ({
+      status: "ok", skillFired: null, trajectory: [], cost: 0.01,
+      env: {
+        runtimeVersion: "2.1.305",
+        loadedSkills: opts.cwd === src ? ["greeter", "debug", ...builtins] : builtins,
+      },
+    }),
+  };
+  try {
+    const r = await runDoctor({ cwd: src }, deps);
+    assert.ok(has(r, "fail", /did not load: broken/), JSON.stringify(r.checks, null, 2));
+    assert.ok(has(r, "warn", /"debug" has the same name as a claude-code built-in/));
+    assert.ok(has(r, "info", /3 claude-code built-in skill\(s\) load alongside/));
+    assert.ok(has(r, "pass", /2\.1\.305/));
+    assert.equal(r.exitCode, 2);
+  } finally { rmSync(src, { recursive: true, force: true }); }
+});

@@ -1,7 +1,7 @@
 /**
- * Statistical core (TS port of stats_ref/stats.py — the validated reference impl).
- * Skill activation is Bernoulli with unknown p; we estimate from k runs and never
- * report a bare point. See ../../STATS.md.
+ * Statistical core (TS port of the validated Python reference implementation from the research
+ * phase). Skill activation is Bernoulli with unknown p; we estimate from k runs and never report a
+ * bare point. The README's "How verdicts are decided" section explains the sequential verdicts.
  */
 
 const Z: Record<string, number> = {
@@ -35,14 +35,131 @@ export function reliability(x: number, n: number, conf = 0.95): Reliability {
   return { pHat: n ? x / n : 0, ciLow: lo, ciHigh: hi, k: n, conf };
 }
 
-/** Sequential stop rule: is p reliably above/below threshold yet, or keep sampling? */
-export function sequentialDecision(
-  x: number, n: number, threshold: number, conf = 0.95,
-): Decision {
-  const { lo, hi } = wilsonInterval(x, n, conf);
-  if (lo > threshold) return "above";
-  if (hi < threshold) return "below";
+// --- exact group-sequential verdicts ---
+// Checking a CI after every probe and stopping as soon as it clears the threshold ("peeking")
+// inflates the error rate far past the nominal level: measured on the old Wilson rule at k=35, a
+// skill sitting exactly at the threshold was wrongly passed 9% and wrongly failed 18% of the time
+// at a nominal 2.5% per side. A verdict here comes from a plan whose boundaries are calibrated by
+// exact dynamic programming over every probe path, so the guarantee holds no matter when it stops:
+//
+//   P(verdict "above" | true reliability <= threshold) <= 1 - conf
+//   P(verdict "below" | true reliability >= threshold) <= 1 - conf
+//
+// (one-sided per direction; the worst case is p == threshold because the boundaries are monotone).
+// Design is Haybittle-Peto style: interim looks use a strict nominal level so only clear-cut cases
+// stop early, and the final look spends whatever error budget is left.
+
+/** interim looks never decide on fewer valid probes than this */
+const MIN_LOOK = 3;
+
+export interface SequentialPlan {
+  k: number;
+  threshold: number;
+  /** per-direction error bound (1 - conf) */
+  alpha: number;
+  /** nominal one-sided level used at interim looks */
+  interimAlpha: number;
+  /** declare "above" at n valid probes when hits >= upper[n] (n+1 = can't) */
+  upper: number[];
+  /** declare "below" at n valid probes when hits <= lower[n] (-1 = can't) */
+  lower: number[];
+  /** exact P(declare above | p = threshold) and P(declare below | p = threshold); both <= alpha */
+  errAbove: number;
+  errBelow: number;
+}
+
+function binomPmfRow(n: number, p: number): number[] {
+  const row = new Array<number>(n + 1).fill(0);
+  if (p <= 0) { row[0] = 1; return row; }
+  if (p >= 1) { row[n] = 1; return row; }
+  const lp = Math.log(p), lq = Math.log(1 - p), ln = lgamma(n + 1);
+  for (let x = 0; x <= n; x++) {
+    row[x] = Math.exp(ln - lgamma(x + 1) - lgamma(n - x + 1) + x * lp + (n - x) * lq);
+  }
+  return row;
+}
+
+function buildPlan(k: number, theta: number, alpha: number, interim: number): SequentialPlan | null {
+  const upper = Array.from({ length: k + 1 }, (_, n) => n + 1);
+  const lower = new Array<number>(k + 1).fill(-1);
+  if (interim > 0) {
+    for (let n = MIN_LOOK; n < k; n++) {
+      const pmf = binomPmfRow(n, theta);
+      let acc = 0;
+      for (let x = n; x >= 0 && acc + pmf[x]! <= interim; x--) { acc += pmf[x]!; upper[n] = x; }
+      acc = 0;
+      for (let x = 0; x <= n && acc + pmf[x]! <= interim; x++) { acc += pmf[x]!; lower[n] = x; }
+    }
+  }
+  // dist[x] = P(X_n = x AND no boundary crossed yet | p = theta)
+  let dist = [1];
+  let errAbove = 0, errBelow = 0;
+  for (let n = 1; n <= k; n++) {
+    const next = new Array<number>(n + 1).fill(0);
+    for (let x = 0; x < n; x++) {
+      next[x]! += dist[x]! * (1 - theta);
+      next[x + 1]! += dist[x]! * theta;
+    }
+    if (n < k) {
+      for (let x = 0; x <= n; x++) {
+        if (x >= upper[n]!) { errAbove += next[x]!; next[x] = 0; }
+        else if (x <= lower[n]!) { errBelow += next[x]!; next[x] = 0; }
+      }
+    }
+    dist = next;
+  }
+  // interim looks may use at most half the budget; the final look must keep real power
+  if (interim > 0 && (errAbove > alpha / 2 || errBelow > alpha / 2)) return null;
+  const tol = alpha * 1e-12;
+  for (let x = k; x >= 0 && errAbove + dist[x]! <= alpha + tol; x--) { errAbove += dist[x]!; upper[k] = x; }
+  for (let x = 0; x < upper[k]! && errBelow + dist[x]! <= alpha + tol; x++) { errBelow += dist[x]!; lower[k] = x; }
+  return { k, threshold: theta, alpha, interimAlpha: interim, upper, lower, errAbove, errBelow };
+}
+
+const planCache = new Map<string, SequentialPlan>();
+
+/** The verdict plan for up to k valid probes against `threshold` at confidence `conf`. Memoized. */
+export function sequentialPlan(k: number, threshold: number, conf = 0.95): SequentialPlan {
+  if (!Number.isInteger(k) || k < 1) throw new Error(`k must be a positive integer (got ${k})`);
+  if (!(threshold > 0 && threshold < 1)) throw new Error(`threshold must be in (0,1) (got ${threshold})`);
+  if (!(conf > 0.5 && conf < 1)) throw new Error(`conf must be in (0.5,1) (got ${conf})`);
+  const key = `${k}|${threshold}|${conf}`;
+  const hit = planCache.get(key);
+  if (hit) return hit;
+  const alpha = 1 - conf;
+  let plan: SequentialPlan | null = null;
+  for (let interim = alpha / 10; !plan && interim > 1e-9; interim /= 2) {
+    plan = buildPlan(k, threshold, alpha, interim);
+  }
+  plan ??= buildPlan(k, threshold, alpha, 0)!; // no early stopping at all
+  planCache.set(key, plan);
+  return plan;
+}
+
+/** Verdict after n valid probes with x hits. Valid at ANY n <= k: stopping early (decided) or
+ * because infra errors exhausted the attempt budget both keep the error guarantee. */
+export function planDecision(plan: SequentialPlan, x: number, n: number): Decision {
+  if (n < 1) return "undecided";
+  const i = Math.min(n, plan.k);
+  if (x >= plan.upper[i]!) return "above";
+  if (x <= plan.lower[i]!) return "below";
   return "undecided";
+}
+
+/** Convenience: the verdict for x/n under the plan for max k (defaults to k = n, a fixed-n test). */
+export function sequentialDecision(
+  x: number, n: number, threshold: number, conf = 0.95, k = n,
+): Decision {
+  return planDecision(sequentialPlan(Math.max(k, 1), threshold, conf), x, n);
+}
+
+/** Smallest k at which an all-success run can certify reliability > threshold. */
+export function kToCertify(threshold: number, conf = 0.95): number {
+  const est = Math.ceil(Math.log(1 - conf) / Math.log(threshold));
+  for (let k = Math.max(1, est - 3); k <= Math.max(est + 50, 10); k++) {
+    if (sequentialPlan(k, threshold, conf).upper[k]! <= k) return k;
+  }
+  return est;
 }
 
 // --- lgamma (Lanczos) ---

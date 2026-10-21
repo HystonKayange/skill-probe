@@ -4,13 +4,15 @@
  *
  * Exit: 0 = healthy, 1 = warnings only, 2 = at least one hard failure. */
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Config, ProbeResult, ProbeOpts } from "./types.ts";
+import { type Config, type ProbeResult, type ProbeOpts, probeSettings } from "./types.ts";
 import { loadConfig } from "./config.ts";
-import { wilsonInterval } from "./stats.ts";
-import { kToCertify } from "./report.ts";
+import { kToCertify } from "./stats.ts";
 import { getAdapter } from "./adapters/index.ts";
+import { readSkillFile, skillFolders, skillsRoot, type SkillInfo } from "./skills.ts";
+import { loadProblems } from "./orchestrator.ts";
+import { withSandbox } from "./sandbox.ts";
 
 export type CheckStatus = "pass" | "warn" | "fail" | "info";
 export interface Check { status: CheckStatus; message: string }
@@ -22,6 +24,7 @@ export interface DoctorOpts {
   runtime?: string;
   model?: string;
   skipProbe?: boolean;
+  userConfig?: boolean;
 }
 
 /** Injection seam so tests don't shell out to a real runtime. */
@@ -30,9 +33,8 @@ export interface DoctorDeps {
   probe?: (runtime: string, prompt: string, opts: ProbeOpts) => Promise<ProbeResult>;
 }
 
-const NAME_RE = /^name:\s*(.*)$/m;
-const DESC_RE = /^description:\s*(.*)$/m;
 const MIN_NODE = { major: 22, minor: 18 }; // package.json engines: ">=22.18"
+const HARMLESS_PROMPT = "Reply with exactly: ok";
 
 function realCliInstalled(cmd: string): boolean {
   const r = spawnSync(cmd, ["--version"], { stdio: "ignore", timeout: 15_000 });
@@ -74,31 +76,27 @@ export async function runDoctor(opts: DoctorOpts, deps: DoctorDeps = {}): Promis
   const runtime = cfg?.runtime ?? opts.runtime ?? "claude-code";
 
   // 3-6. Skills directory + each SKILL.md
-  const skillNames = new Set<string>();
-  const skillsRoot = join(skillsCwd, ".claude", "skills");
-  if (!existsSync(skillsRoot)) {
+  const library: SkillInfo[] = [];
+  const root = skillsRoot(skillsCwd);
+  if (!existsSync(root)) {
     add("fail", `no .claude/skills/ directory under ${skillsCwd}`);
   } else {
-    const dirs = readdirSync(skillsRoot, { withFileTypes: true }).filter((d) => d.isDirectory());
+    const dirs = skillFolders(skillsCwd);
     if (dirs.length === 0) {
       add("fail", `.claude/skills/ exists but contains no skill folders`);
     }
-    let valid = 0;
-    for (const d of dirs) {
-      const md = join(skillsRoot, d.name, "SKILL.md");
-      if (!existsSync(md)) { add("fail", `skill "${d.name}" missing SKILL.md`); continue; }
-      const text = readFileSync(md, "utf8");
-      const name = NAME_RE.exec(text)?.[1]?.trim() ?? "";
-      const desc = DESC_RE.exec(text)?.[1]?.trim() ?? "";
-      if (!name) add("fail", `skill "${d.name}" missing name:`);
-      else if (name !== d.name) add("warn", `skill "${d.name}" has name: "${name}" (doesn't match folder name)`);
-      if (!desc) add("fail", `skill "${d.name}" missing description:`);
-      else if (desc === "|" || desc === ">") add("warn", `skill "${d.name}" uses a multi-line description block — a single-line description triggers more reliably`);
-      skillNames.add(d.name);
-      valid++;
+    for (const name of dirs) {
+      const md = join(root, name, "SKILL.md");
+      if (!existsSync(md)) { add("fail", `skill "${name}" missing SKILL.md`); continue; }
+      const s = readSkillFile(md, name);
+      if (!s.frontmatterName) add("fail", `skill "${name}" missing name: (in a --- frontmatter block)`);
+      else if (s.frontmatterName !== name) add("warn", `skill "${name}" has name: "${s.frontmatterName}" (doesn't match folder name)`);
+      if (!s.description) add("fail", `skill "${name}" missing description: (in a --- frontmatter block)`);
+      library.push(s);
     }
-    if (valid > 0) add("pass", `found .claude/skills/ with ${valid} skill${valid === 1 ? "" : "s"}`);
+    if (library.length > 0) add("pass", `found .claude/skills/ with ${library.length} skill${library.length === 1 ? "" : "s"}`);
   }
+  const skillNames = new Set(library.map((s) => s.name));
 
   // 7-9. Config-dependent checks
   if (cfg) {
@@ -113,14 +111,19 @@ export async function runDoctor(opts: DoctorOpts, deps: DoctorDeps = {}): Promis
     }
 
     // a strict threshold at a small k can be mathematically impossible to certify
-    if (wilsonInterval(cfg.k, cfg.k, cfg.conf).lo <= cfg.threshold) {
+    const need = kToCertify(cfg.threshold, cfg.conf);
+    if (need > cfg.k) {
       add("warn", `threshold ${Math.round(cfg.threshold * 100)}% with k=${cfg.k} cannot certify a pass ` +
-        `even on a perfect run — need ~k=${kToCertify(cfg.threshold, cfg.conf)} (or lower the threshold)`);
+        `even on a perfect run — need k≥${need} (or lower the threshold)`);
+    }
+    if (cfg.userConfig) {
+      add("warn", `userConfig is on: probes load your personal runtime config, so results won't reproduce in CI`);
     }
   }
 
   // 10-11. Runtime + a harmless live probe (verifies the CLI is installed AND authed)
-  add("info", `runtime: ${runtime}  model: ${cfg?.model ?? opts.model ?? "(runtime default)"}`);
+  const model = cfg?.model ?? opts.model;
+  add("info", `runtime: ${runtime}  model: ${model ?? "(runtime default)"}`);
   const known = runtime === "claude-code" || runtime === "opencode";
   const bin = runtime === "claude-code" ? "claude" : runtime === "opencode" ? "opencode" : null;
   let cliOk = false;
@@ -136,12 +139,44 @@ export async function runDoctor(opts: DoctorOpts, deps: DoctorDeps = {}): Promis
   if (opts.skipProbe) {
     add("info", `probe skipped (--skip-probe)`);
   } else if (known && cliOk) {
-    const r = await probe(runtime, "Reply with exactly: ok", {
-      cwd: skillsCwd, timeoutMs: 60_000,
-      ...(cfg?.model ?? opts.model ? { model: (cfg?.model ?? opts.model)! } : {}),
-    });
-    if (r.status === "ok") add("pass", `${runtime} probe succeeded (CLI is authenticated)`);
-    else add("fail", `${runtime} probe failed — check auth/login: ${r.error ?? "unknown error"}`);
+    const settings: Omit<ProbeOpts, "cwd"> = {
+      ...(cfg ? probeSettings(cfg) : {}),
+      ...(model ? { model } : {}),
+      ...(opts.userConfig ? { userConfig: true } : {}),
+      timeoutMs: 60_000,
+    };
+    const r = await probe(runtime, HARMLESS_PROMPT, { cwd: skillsCwd, ...settings });
+    if (r.status !== "ok") {
+      add("fail", `${runtime} probe failed — check auth/login: ${r.error ?? "unknown error"}`);
+    } else {
+      add("pass", `${runtime} probe succeeded (CLI is authenticated)` +
+        (r.env?.runtimeVersion ? ` — ${bin} ${r.env.runtimeVersion}` : "") +
+        (r.env?.model && !model ? `, default model ${r.env.model}` : ""));
+      // what the runtime ACTUALLY loads (only runtimes that report it)
+      if (r.env?.loadedSkills && library.length) {
+        const { missing } = loadProblems(r.env, library.map((s) => s.name), library);
+        if (missing.length) {
+          add("fail", `the runtime did not load: ${missing.join(", ")} — it rejected or ignored these ` +
+            `SKILL.md files, so they can never fire`);
+        } else {
+          add("pass", `the runtime loads all ${library.length} library skill${library.length === 1 ? "" : "s"}`);
+        }
+        // built-ins load in every probe; a library skill sharing a built-in's name is ambiguous
+        const empty = await withSandbox(skillsCwd, [], (sb) => probe(runtime, HARMLESS_PROMPT, { cwd: sb.cwd, ...settings }));
+        const builtins = empty.status === "ok" ? empty.env?.loadedSkills ?? [] : [];
+        const clash = library.filter((s) => builtins.includes(s.name) ||
+          (s.frontmatterName !== undefined && builtins.includes(s.frontmatterName)));
+        for (const s of clash) {
+          add("warn", `skill "${s.name}" has the same name as a ${runtime} built-in skill — the two compete ` +
+            `for the same trigger; consider renaming it`);
+        }
+        if (builtins.length) {
+          add("info", `${builtins.length} ${runtime} built-in skill(s) load alongside your library in every probe ` +
+            `(${builtins.slice(0, 8).join(", ")}${builtins.length > 8 ? ", …" : ""}) — they are part of the real ` +
+            `environment and can steal triggers`);
+        }
+      }
+    }
   }
 
   const hasFail = checks.some((c) => c.status === "fail");

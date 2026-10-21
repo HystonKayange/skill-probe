@@ -19,8 +19,8 @@ test("listSkills reads name + description from each SKILL.md", () => {
   const cwd = setup();
   const skills = listSkills(cwd).sort((a, b) => a.name.localeCompare(b.name));
   assert.deepEqual(skills, [
-    { name: "alpha", description: "do alpha things" },
-    { name: "beta", description: "do beta things" },
+    { name: "alpha", description: "do alpha things", frontmatterName: "alpha" },
+    { name: "beta", description: "do beta things", frontmatterName: "beta" },
   ]);
   rmSync(cwd, { recursive: true, force: true });
 });

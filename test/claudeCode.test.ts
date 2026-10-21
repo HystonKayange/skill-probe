@@ -51,3 +51,38 @@ test("interpretProbe: no assistant output is an infra error with stderr context"
   assert.equal(r.status, "error");
   assert.match(r.error!, /auth expired/);
 });
+
+test("REAL captured stream (Claude Code 2.1.305): skill, cost and loaded-skill env all parse", async () => {
+  const { readFileSync } = await import("node:fs");
+  const raw = readFileSync(new URL("./fixtures/claude-code-2.1.305-skill-fired.jsonl", import.meta.url), "utf8");
+  const r = interpretProbe(parseStream(raw), "");
+  assert.equal(r.status, "ok");
+  assert.equal(r.skillFired, "commit-writer");
+  assert.ok(r.cost > 0);
+  assert.equal(r.env?.runtimeVersion, "2.1.305");
+  assert.equal(r.env?.model, "claude-opus-5-5");
+  assert.ok(r.env?.loadedSkills?.includes("commit-writer"));
+  assert.ok(r.env?.loadedSkills?.includes("pr-describer"));
+  // hermetic run: no user plugins (namespaced "plugin:skill") made it in
+  assert.ok(!r.env?.loadedSkills?.some((s) => s.includes(":")), r.env?.loadedSkills?.join(","));
+});
+
+test("buildArgs: hermetic + no session transcripts by default; --user-config opts back in", async () => {
+  const { buildArgs } = await import("../src/adapters/claudeCode.ts");
+  const a = buildArgs("hi", {});
+  assert.deepEqual(a.slice(0, 2), ["-p", "hi"]);
+  for (const f of ["--no-session-persistence", "--strict-mcp-config"]) assert.ok(a.includes(f), f);
+  assert.equal(a[a.indexOf("--setting-sources") + 1], "project");
+  assert.equal(a[a.indexOf("--max-turns") + 1], "1");
+  const u = buildArgs("hi", { userConfig: true, maxTurns: 3, model: "m" });
+  assert.ok(!u.includes("--setting-sources") && !u.includes("--strict-mcp-config"));
+  assert.ok(u.includes("--no-session-persistence"), "never write session files");
+  assert.equal(u[u.indexOf("--max-turns") + 1], "3");
+  assert.equal(u[u.indexOf("--model") + 1], "m");
+});
+
+test("interpretProbe: an unsupported-flag failure tells the user to upgrade Claude Code", () => {
+  const r = interpretProbe(parseStream(""), "error: unknown option '--setting-sources'");
+  assert.equal(r.status, "error");
+  assert.match(r.error!, /upgrade/);
+});

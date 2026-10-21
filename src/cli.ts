@@ -2,7 +2,8 @@
 /** skill-probe CLI.
  *   skill-probe --config <f>                  audit a co-loaded skill library
  *   skill-probe fix --config <f> --skill <n>  rewrite a skill's description & prove the lift
- * Exit: 0 = pass/applied, 1 = behavioral fail/reverted, 2 = inconclusive/infra error/usage. */
+ * Exit: 0 = pass/applied, 1 = behavioral fail/not applied, 2 = inconclusive/infra error/usage,
+ *       130/143 = interrupted (children killed, sandboxes removed). */
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { runAudit, type ProgressEvent } from "./eval.ts";
@@ -14,11 +15,17 @@ import { listSkills, generateCases, genConfig } from "./gen.ts";
 import { loadConfig, parseProbability, parseIntFlag, ConfigError } from "./config.ts";
 import { loadBaseline, saveBaseline, compareToBaseline, type BaselineComparison } from "./baseline.ts";
 import { renderTable, renderMarkdown, renderJson, renderFix, renderContext, renderDoctor, renderDiagnose, renderBaseline } from "./report.ts";
+import { Budget } from "./orchestrator.ts";
+import { toolVersion } from "./manifest.ts";
+import { installSignalHandlers } from "./proc.ts";
+import type { Config } from "./types.ts";
+
+const COMMANDS = new Set(["audit", "context", "diagnose", "doctor", "gen", "fix"]);
 
 const HELP = `skill-probe — audit a co-loaded agent skill library by real activation behavior.
 
 USAGE
-  skill-probe --config <file.json> [options]                 # audit
+  skill-probe [audit] --config <file.json> [options]         # audit
   skill-probe context --config <file.json> [--ablate]        # isolation vs co-loaded activation rates
   skill-probe diagnose --config <file.json> [options]        # why a skill fails: routing-miss vs description
   skill-probe doctor [--cwd <dir>] [--config <file.json>]    # preflight: setup/auth/config sanity
@@ -33,12 +40,24 @@ OPTIONS
                            Recorded in the report — REQUIRED for a fair cross-runtime comparison.
       --k <n>              max VALID repeats per prompt (positive integer; default 10)
       --threshold <p>      min acceptable reliability, strictly 0..1 (default 0.7 = smoke test)
-      --conf <p>           confidence level: 0.9 | 0.95 | 0.99 (default 0.95)
+      --conf <p>           confidence: 0.9 | 0.95 | 0.99 (default 0.95). A verdict is wrong with
+                           probability <= 1-conf, however early the run stops.
+      --max-turns <n>      agent turns per probe before reading the outcome (default 1)
+      --timeout <sec>      per-probe timeout in seconds (default 120)
+      --user-config        also load your personal runtime config (user settings, plugins, MCP
+                           servers) into probes. Off by default (claude-code): results then
+                           reproduce in CI. opencode always loads its global config.
+      --concurrency <n>    cases probed in parallel (default 1; mind your rate limits)
+      --max-cost <usd>     stop probing once runtime probes have spent this much; cases cut short
+                           are inconclusive (error if never started), never a pass. LLM calls
+                           (gen, fix's rewrite, diagnose's forced choice) aren't counted
       --json               emit JSON instead of a table
       --markdown           emit a Markdown table (paste into a PR/README)
       --no-cost            hide the cost line (e.g. when on a Claude subscription)
       --quiet              suppress the live progress line on stderr
-  audit only (CI gating):
+  -v, --version            print the version
+  audit only:
+      --fail-on-theft      fail a case when ANY other skill fires, even if reliability clears the bar
       --save-baseline <f>  after the run, save per-case counts + a run manifest to <f>
       --baseline <f>       compare this run against a saved baseline: per-case Fisher's exact,
                            Benjamini-Hochberg corrected — exit 1 ONLY on a significant regression
@@ -51,7 +70,7 @@ OPTIONS
   doctor only:
       --cwd <dir>          project dir containing .claude/skills/ (default: .)
       --config <file>      also sanity-check a config (expected skills exist, k/threshold feasible)
-      --skip-probe         don't run the harmless live probe (skip the auth check; no cost)
+      --skip-probe         don't run the harmless live probes (skip the auth/load checks; no cost)
   gen only (uses ANTHROPIC_API_KEY if set, else the logged-in 'claude' CLI):
       --cwd <dir>          project dir containing .claude/skills/ (default: .)
       --per-skill <n>      should-fire prompts to draft per skill (default 3)
@@ -61,8 +80,8 @@ OPTIONS
       --apply-threshold <p> min P(improvement) to keep the rewrite (default 0.9)
   -h, --help               show this help
 
-Reliability carries a Wilson CI + sample size k. fix rewrites the description, runs an INTERLEAVED
-before/after, and applies it only if the Bayesian P(improvement) clears the apply-threshold.`;
+Reliability carries a Wilson CI + sample size k. fix runs a PAIRED before/after in two sandboxes and
+writes the new description only if the Bayesian P(improvement) clears the apply-threshold.`;
 
 let progressLen = 0;
 function makeProgress(values: Record<string, unknown>): ((e: ProgressEvent) => void) | undefined {
@@ -102,13 +121,33 @@ function makeDiagProgress(values: Record<string, unknown>): ((e: DiagProgress) =
   };
 }
 
-async function audit(values: Record<string, unknown>): Promise<number> {
-  const cfg = loadConfig(values["config"] as string, {
-    runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
-    k: values["k"] as string | undefined, threshold: values["threshold"] as string | undefined,
-    conf: values["conf"] as string | undefined,
+/** The config plus every CLI override that changes what is measured. */
+function configFrom(values: Record<string, unknown>, opts: { threshold?: boolean } = {}): Config {
+  const str = (k: string): string | undefined => values[k] as string | undefined;
+  return loadConfig(values["config"] as string, {
+    runtime: str("runtime"), model: str("model"), k: str("k"), conf: str("conf"),
+    ...(opts.threshold === false ? {} : { threshold: str("threshold") }),
+    maxTurns: str("max-turns"), timeout: str("timeout"),
+    userConfig: Boolean(values["user-config"]), failOnTheft: Boolean(values["fail-on-theft"]),
   });
-  const result = await runAudit(cfg, makeProgress(values));
+}
+
+/** Run-time knobs that DON'T change what is measured (parallelism, spend cap). */
+function runOpts(values: Record<string, unknown>): { concurrency: number; budget?: Budget } {
+  const concurrency = parseIntFlag(values["concurrency"] as string | undefined, "--concurrency", 1, 1);
+  const raw = values["max-cost"] as string | undefined;
+  if (raw === undefined) return { concurrency };
+  const max = Number(raw);
+  if (!Number.isFinite(max) || max <= 0) {
+    throw new ConfigError([`--max-cost must be a positive number of USD (got ${JSON.stringify(raw)})`]);
+  }
+  return { concurrency, budget: new Budget(max) };
+}
+
+async function audit(values: Record<string, unknown>): Promise<number> {
+  const cfg = configFrom(values);
+  const progress = makeProgress(values);
+  const result = await runAudit(cfg, { ...runOpts(values), ...(progress ? { onProgress: progress } : {}) });
   clearProgress();
   const showCost = !values["no-cost"];
 
@@ -130,14 +169,9 @@ async function audit(values: Record<string, unknown>): Promise<number> {
 }
 
 async function diagnose(values: Record<string, unknown>): Promise<number> {
-  const cfg = loadConfig(values["config"] as string, {
-    runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
-    k: values["k"] as string | undefined, threshold: values["threshold"] as string | undefined,
-    conf: values["conf"] as string | undefined,
-  });
-  const result = await runDiagnose(cfg, {
-    ...(makeDiagProgress(values) ? { onProgress: makeDiagProgress(values)! } : {}),
-  });
+  const cfg = configFrom(values);
+  const onProgress = makeDiagProgress(values);
+  const result = await runDiagnose(cfg, { ...runOpts(values), ...(onProgress ? { onProgress } : {}) });
   clearProgress();
   const showCost = !values["no-cost"];
   console.log(values["json"] ? renderJson(result) : renderDiagnose(result, { showCost }));
@@ -151,21 +185,18 @@ async function doctor(values: Record<string, unknown>): Promise<number> {
     ...(values["runtime"] ? { runtime: values["runtime"] as string } : {}),
     ...(values["model"] ? { model: values["model"] as string } : {}),
     ...(values["skip-probe"] ? { skipProbe: true } : {}),
+    ...(values["user-config"] ? { userConfig: true } : {}),
   });
   console.log(values["json"] ? renderJson(result) : renderDoctor(result));
   return result.exitCode;
 }
 
 async function context(values: Record<string, unknown>): Promise<number> {
-  const cfg = loadConfig(values["config"] as string, {
-    runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
-    k: values["k"] as string | undefined, threshold: values["threshold"] as string | undefined,
-    conf: values["conf"] as string | undefined,
-  });
+  const cfg = configFrom(values);
   const suspects = parseIntFlag(values["suspects"] as string | undefined, "--suspects", 3, 1);
   const onProgress = makeContextProgress(values);
   const result = await runContextAudit(cfg, {
-    ablate: Boolean(values["ablate"]), suspects,
+    ablate: Boolean(values["ablate"]), suspects, ...runOpts(values),
     ...(onProgress ? { onProgress } : {}),
   });
   clearProgress();
@@ -196,12 +227,11 @@ async function gen(values: Record<string, unknown>): Promise<number> {
 async function fix(values: Record<string, unknown>): Promise<number> {
   const skill = values["skill"] as string | undefined;
   if (!skill) { console.error("fix requires --skill <name>"); return 2; }
-  const cfg = loadConfig(values["config"] as string, {
-    runtime: values["runtime"] as string | undefined, model: values["model"] as string | undefined,
-    k: values["k"] as string | undefined, conf: values["conf"] as string | undefined,
-  });
+  const cfg = configFrom(values, { threshold: false });
   const applyBar = parseProbability(values["apply-threshold"] as string | undefined, "--apply-threshold", 0.9);
-  const result = await runFix(cfg, { skill, k: cfg.k, applyBar, ...(cfg.model ? { model: cfg.model } : {}) });
+  const result = await runFix(cfg, {
+    skill, k: cfg.k, applyBar, ...runOpts(values), ...(cfg.model ? { model: cfg.model } : {}),
+  });
   console.log(values["json"] ? renderJson(result) : renderFix(result));
   return result.applied ? 0 : 1;
 }
@@ -226,6 +256,13 @@ async function main(): Promise<void> {
       baseline: { type: "string" },
       "save-baseline": { type: "string" },
       "skip-probe": { type: "boolean", default: false },
+      "max-turns": { type: "string" },
+      timeout: { type: "string" },
+      "user-config": { type: "boolean", default: false },
+      "fail-on-theft": { type: "boolean", default: false },
+      concurrency: { type: "string" },
+      "max-cost": { type: "string" },
+      version: { type: "boolean", short: "v", default: false },
       json: { type: "boolean", default: false },
       markdown: { type: "boolean", default: false },
       "no-cost": { type: "boolean", default: false },
@@ -237,14 +274,23 @@ async function main(): Promise<void> {
     console.log(HELP);
     process.exit(0);
   }
-  const cmd = positionals[0];
+  if (values.version) {
+    console.log(toolVersion());
+    process.exit(0);
+  }
+  const cmd = positionals[0] ?? "audit";
+  if (!COMMANDS.has(cmd) || positionals.length > 1) {
+    console.error(`unknown command: ${positionals.join(" ")} (expected one of: ${[...COMMANDS].join(", ")})`);
+    process.exit(2);
+  }
+  installSignalHandlers();
   let code: number;
   if (cmd === "gen") {
     code = await gen(values);
   } else if (cmd === "doctor") {
     code = await doctor(values); // config is optional for doctor
   } else {
-    if (!values.config) { console.log(HELP); process.exit(2); }
+    if (!values.config) { console.error(HELP); process.exit(2); }
     code = cmd === "fix" ? await fix(values)
       : cmd === "context" ? await context(values)
       : cmd === "diagnose" ? await diagnose(values)

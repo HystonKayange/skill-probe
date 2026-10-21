@@ -54,3 +54,23 @@ test("rejects empty / malformed cases", () => {
   assert.throws(() => validateConfig({ cases: [{ prompt: "ok", expected: 42 }] }, PATH), ConfigError);
   assert.doesNotThrow(() => validateConfig({ cases: [{ prompt: "ok", expected: null }] }, PATH));
 });
+
+test("a typo'd key fails loud instead of silently using the default", () => {
+  assert.throws(() => validateConfig({ treshold: 0.9, cases: okCases }, PATH), /unknown config key "treshold"/);
+  // $schema and _comments are allowed
+  assert.doesNotThrow(() => validateConfig({ $schema: "x", _note: "hi", cases: okCases }, PATH));
+});
+
+test("new probe settings validate and land on the config", () => {
+  const cfg = validateConfig({ cases: okCases, maxTurns: 2, timeout: 30, userConfig: true, failOnTheft: true }, PATH);
+  assert.equal(cfg.maxTurns, 2);
+  assert.equal(cfg.timeoutMs, 30_000);
+  assert.equal(cfg.userConfig, true);
+  assert.equal(cfg.failOnTheft, true);
+  const d = validateConfig({ cases: okCases }, PATH);
+  assert.equal(d.maxTurns, undefined);
+  assert.equal(d.userConfig, undefined);
+  for (const bad of [{ maxTurns: 0 }, { maxTurns: 1.5 }, { timeout: -1 }, { userConfig: "yes" }, { failOnTheft: 1 }]) {
+    assert.throws(() => validateConfig({ cases: okCases, ...bad }, PATH), ConfigError, JSON.stringify(bad));
+  }
+});

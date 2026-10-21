@@ -2,27 +2,11 @@
  * already say what each skill is for, so an LLM can propose realistic should-fire prompts,
  * cross-skill near-misses (to surface mis-routing), and decoys. ALWAYS human-reviewed before use
  * (the generator tends toward obvious keyword-matches; you add the messy real-world phrasings). */
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import type { Config, EvalCase } from "./types.ts";
 import { complete } from "./llm.ts";
+import type { SkillInfo } from "./skills.ts";
 
-const DESC_RE = /^description:\s*(.*)$/m;
-
-export interface SkillInfo { name: string; description: string; }
-
-export function listSkills(cwd: string): SkillInfo[] {
-  const root = join(cwd, ".claude", "skills");
-  if (!existsSync(root)) throw new Error(`no .claude/skills/ directory under ${cwd}`);
-  const skills: SkillInfo[] = [];
-  for (const name of readdirSync(root)) {
-    const file = join(root, name, "SKILL.md");
-    if (!existsSync(file)) continue;
-    const m = DESC_RE.exec(readFileSync(file, "utf8"));
-    skills.push({ name, description: m ? m[1]!.trim() : "" });
-  }
-  return skills;
-}
+export { listSkills, type SkillInfo } from "./skills.ts";
 
 export interface GenOpts { perSkill: number; decoys: number; model?: string }
 /** A raw, untrusted candidate from a generator — sanitized by generateCases(). */

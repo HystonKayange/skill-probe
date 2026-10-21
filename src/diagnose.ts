@@ -11,14 +11,14 @@
  * We measure ACTUAL activation (the real runtime probe) and INTENDED routing (a forced-choice: the
  * model is shown the skill descriptions and asked which one applies, with no auto-execution), then
  * classify the gap between them. */
-import type { Config } from "./types.ts";
-import { reliability, sequentialDecision } from "./stats.ts";
-import { measure, infraUntrustworthy, type RunStats } from "./orchestrator.ts";
+import { type Config, probeSettings } from "./types.ts";
+import { reliability, planDecision, sequentialPlan, type SequentialPlan } from "./stats.ts";
+import { measure, mapPool, infraUntrustworthy, extraSkills, type Budget, type RunStats } from "./orchestrator.ts";
 import { getAdapter } from "./adapters/index.ts";
-import { listSkills, type SkillInfo } from "./gen.ts";
+import { listSkills, type SkillInfo } from "./skills.ts";
 import { complete } from "./llm.ts";
 import { ConfigError } from "./config.ts";
-import { buildManifest, type RunManifest } from "./manifest.ts";
+import { buildManifest, buildEnvironment, capabilityWarnings, type RunManifest } from "./manifest.ts";
 
 export type DiagVerdict = "routes-ok" | "routing-miss" | "description-problem" | "inconclusive" | "error";
 
@@ -50,6 +50,8 @@ export interface DiagnoseResult {
   exitCode: 0 | 1 | 2;
   /** who/what/when of this run — makes reports citable and comparable */
   manifest: RunManifest;
+  /** run-level caveats (runtime capabilities, budget cut-offs) */
+  warnings: string[];
 }
 
 export interface DiagProgress {
@@ -88,7 +90,7 @@ export const defaultChoice: ChoiceFn = async (skills, prompt, model) => {
 
 async function measureIntended(
   skills: SkillInfo[], prompt: string, expected: string,
-  o: { maxK: number; threshold: number; conf: number; choice: ChoiceFn; model?: string; onProbe?: (n: number, k: number) => void },
+  o: { maxK: number; plan: SequentialPlan; choice: ChoiceFn; model?: string; onProbe?: (n: number, k: number) => void },
 ): Promise<IntendedStats> {
   const dist: Record<string, number> = {};
   let hits = 0, n = 0, errors = 0;
@@ -100,14 +102,13 @@ async function measureIntended(
     if (c === expected) hits++;
     n++;
     o.onProbe?.(n, o.maxK);
-    if (n >= 3 && sequentialDecision(hits, n, o.threshold, o.conf) !== "undecided") break;
+    if (planDecision(o.plan, hits, n) !== "undecided") break;
   }
   return { dist, hits, n, errors };
 }
 
 function classify(
-  actual: RunStats, actualRel: Rel, intended: IntendedStats, expected: string,
-  threshold: number, conf: number,
+  actual: RunStats, actualRel: Rel, intended: IntendedStats, expected: string, plan: SequentialPlan,
 ): { verdict: DiagVerdict; competitor: string | null; remedy: string } {
   const competitor = Object.entries(actual.dist)
     .filter(([s]) => s !== expected && s !== "None")
@@ -117,11 +118,11 @@ function classify(
     return { verdict: "error", competitor,
       remedy: "infrastructure/LLM errors dominated — rerun; the result isn't trustworthy." };
   }
-  const actualDecision = sequentialDecision(actual.hits, actual.n, threshold, conf);
+  const actualDecision = planDecision(plan, actual.hits, actual.n);
   if (actualDecision === "above") {
     // actual is the ground truth. But if the forced-choice router rarely picks it, the description
     // reads ambiguously in isolation — a leading indicator that activation may be fragile.
-    const ambiguous = sequentialDecision(intended.hits, intended.n, threshold, conf) === "below";
+    const ambiguous = planDecision(plan, intended.hits, intended.n) === "below";
     const note = ambiguous
       ? ` — but the description reads ambiguously in isolation (intended only ${Math.round((intended.hits / intended.n) * 100)}%), ` +
         `so activation may be fragile across models/contexts`
@@ -129,7 +130,7 @@ function classify(
     return { verdict: "routes-ok", competitor: null,
       remedy: `fires reliably (${Math.round(actualRel.pHat * 100)}%) — no action needed${note}.` };
   }
-  const intendedDecision = sequentialDecision(intended.hits, intended.n, threshold, conf);
+  const intendedDecision = planDecision(plan, intended.hits, intended.n);
   if (intendedDecision === "above") {
     return { verdict: "routing-miss", competitor,
       remedy: `the model picks "${expected}" when asked, but ${competitor ? `"${competitor}"` : "another skill"} ` +
@@ -145,22 +146,28 @@ function classify(
     remedy: "neither activation nor intent is statistically decided — raise k and rerun." };
 }
 
-export async function runDiagnose(
-  cfg: Config,
-  deps: { choice?: ChoiceFn; onProgress?: (e: DiagProgress) => void } = {},
-): Promise<DiagnoseResult> {
+export interface DiagnoseOpts {
+  choice?: ChoiceFn;
+  onProgress?: (e: DiagProgress) => void;
+  /** cases diagnosed in parallel (default 1) */
+  concurrency?: number;
+  budget?: Budget;
+}
+
+export async function runDiagnose(cfg: Config, deps: DiagnoseOpts = {}): Promise<DiagnoseResult> {
   const adapter = getAdapter(cfg.runtime);
   const choice = deps.choice ?? defaultChoice;
   const skills = listSkills(cfg.cwd);
   const present = new Set(skills.map((s) => s.name));
+  const plan = sequentialPlan(cfg.k, cfg.threshold, cfg.conf);
 
   const skipped: string[] = [];
   const unknown: string[] = [];
-  const eligible: typeof cfg.cases = [];
+  const eligible: Array<{ prompt: string; expected: string }> = [];
   for (const c of cfg.cases) {
     if (c.expected === null) skipped.push(c.prompt);
     else if (!present.has(c.expected)) unknown.push(c.expected);
-    else eligible.push(c);
+    else eligible.push({ prompt: c.prompt, expected: c.expected });
   }
   if (unknown.length) {
     throw new ConfigError([
@@ -169,40 +176,44 @@ export async function runDiagnose(
     ]);
   }
 
-  const cases: DiagCaseResult[] = [];
-  let totalCost = 0;
-  for (let i = 0; i < eligible.length; i++) {
-    const c = eligible[i]!;
-    const expected = c.expected!;
+  const onProgress = deps.onProgress;
+  const cases = await mapPool(eligible, deps.concurrency ?? 1, async (c, i): Promise<DiagCaseResult> => {
+    const { expected } = c;
     const actual = await measure(adapter, c.prompt, expected, {
-      cwd: cfg.cwd, maxK: cfg.k, threshold: cfg.threshold, conf: cfg.conf,
-      ...(cfg.model ? { model: cfg.model } : {}),
-      ...(deps.onProgress ? { onProbe: (validN, maxK) => deps.onProgress!({ caseIndex: i + 1, caseTotal: eligible.length, prompt: c.prompt, phase: "actual", validN, maxK }) } : {}),
+      cwd: cfg.cwd, maxK: cfg.k, threshold: cfg.threshold, conf: cfg.conf, ...probeSettings(cfg),
+      ...(deps.budget ? { budget: deps.budget } : {}),
+      ...(onProgress ? { onProbe: (validN, maxK) => onProgress({ caseIndex: i + 1, caseTotal: eligible.length, prompt: c.prompt, phase: "actual", validN, maxK }) } : {}),
     });
     const intended = await measureIntended(skills, c.prompt, expected, {
-      maxK: cfg.k, threshold: cfg.threshold, conf: cfg.conf, choice,
+      maxK: cfg.k, plan, choice,
       ...(cfg.model ? { model: cfg.model } : {}),
-      ...(deps.onProgress ? { onProbe: (validN, maxK) => deps.onProgress!({ caseIndex: i + 1, caseTotal: eligible.length, prompt: c.prompt, phase: "intended", validN, maxK }) } : {}),
+      ...(onProgress ? { onProbe: (validN, maxK) => onProgress({ caseIndex: i + 1, caseTotal: eligible.length, prompt: c.prompt, phase: "intended", validN, maxK }) } : {}),
     });
-    totalCost += actual.totalCost;
     const actualRel = reliability(actual.hits, actual.n, cfg.conf);
     const intendedRel = reliability(intended.hits, intended.n, cfg.conf);
-    const { verdict, competitor, remedy } = classify(actual, actualRel, intended, expected, cfg.threshold, cfg.conf);
-    cases.push({
+    const { verdict, competitor, remedy } = classify(actual, actualRel, intended, expected, plan);
+    return {
       prompt: c.prompt, expected,
       actual: { stats: actual, rel: actualRel },
       intended: { stats: intended, rel: intendedRel },
       verdict, competitor, remedy,
-    });
-  }
+    };
+  });
 
+  const totalCost = cases.reduce((s, c) => s + c.actual.stats.totalCost, 0);
   const hasProblem = cases.some((c) => c.verdict === "routing-miss" || c.verdict === "description-problem");
   const hasBad = cases.some((c) => c.verdict === "error" || c.verdict === "inconclusive");
   const exitCode: 0 | 1 | 2 = hasProblem ? 1 : hasBad ? 2 : 0;
+  const env = cases.find((c) => c.actual.stats.env)?.actual.stats.env;
+  const warnings = capabilityWarnings(cfg, adapter);
+  if (cases.some((c) => c.actual.stats.budgetExhausted)) {
+    warnings.push(`--max-cost budget reached — cases cut short are inconclusive (error if they never started)`);
+  }
 
   return {
     runtime: cfg.runtime, model: cfg.model ?? "(runtime default)",
     threshold: cfg.threshold, conf: cfg.conf, cases, skipped, totalCost, exitCode,
-    manifest: buildManifest("diagnose", cfg),
+    manifest: buildManifest("diagnose", cfg, buildEnvironment(cfg, env, extraSkills(env, skills), adapter)),
+    warnings,
   };
 }
