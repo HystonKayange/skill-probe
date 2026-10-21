@@ -1,20 +1,32 @@
-# Unit tests + typecheck on every push/PR. Zero API calls, zero secrets — the statistical core
-# and all command logic are tested against mock adapters.
+# Unit tests + typecheck + build on every push/PR. Zero API calls, zero secrets — the statistical core
+# and all command logic are tested against mock adapters and real captured runtime output (fixtures).
 name: ci
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
           check-latest: true
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: build + smoke the compiled CLI (what npm users run)
+        run: |
+          npm run build
+          node dist/cli.js --version
+          node dist/cli.js doctor --cwd examples/sample-skills --skip-probe
