@@ -7,6 +7,7 @@ import { buildManifest, configHash, toolVersion } from "../src/manifest.ts";
 import { saveBaseline, loadBaseline, compareToBaseline, toBaseline } from "../src/baseline.ts";
 import type { AuditResult } from "../src/eval.ts";
 import type { Config } from "../src/types.ts";
+import { tempDir } from "./helpers.ts";
 
 const cfg = (over: Partial<Config> = {}): Config => ({
   runtime: "claude-code", cwd: "/tmp/a", k: 10, threshold: 0.7, conf: 0.95,
@@ -47,7 +48,7 @@ test("manifest carries tool version, command, and settings", () => {
 });
 
 test("baseline round-trips through save/load", () => {
-  const dir = mkdtempSync(join(tmpdir(), "skill-probe-baseline-"));
+  const dir = tempDir("skill-probe-baseline-");
   const path = join(dir, "baseline.json");
   const r = auditResult([{ prompt: "say hello", expected: "greeter", hits: 9, n: 10 }], cfg());
   saveBaseline(r, path);
@@ -56,7 +57,7 @@ test("baseline round-trips through save/load", () => {
 });
 
 test("loadBaseline rejects junk with a helpful error", () => {
-  const dir = mkdtempSync(join(tmpdir(), "skill-probe-baseline-"));
+  const dir = tempDir("skill-probe-baseline-");
   const path = join(dir, "junk.json");
   assert.throws(() => loadBaseline(path), /cannot read/);
   writeFileSync(path, "{not json");
@@ -133,4 +134,27 @@ test("a side with no valid probes is NOT comparable — never a silent no-regres
     auditResult([{ prompt: "say hello", expected: "greeter", hits: 0, n: 0 }], c), base);
   assert.equal(cmp.cases[0]!.untrustworthy, true);
   assert.equal(cmp.cases[0]!.regressed, false);
+});
+
+test("configHash is unchanged for default new settings (existing baselines stay valid)", () => {
+  assert.equal(configHash(cfg({ maxTurns: 1, userConfig: false })), configHash(cfg()));
+  assert.notEqual(configHash(cfg({ maxTurns: 2 })), configHash(cfg()));
+  assert.notEqual(configHash(cfg({ userConfig: true })), configHash(cfg()));
+});
+
+test("baseline gate warns when what the runtime ACTUALLY ran with drifted", () => {
+  const c = cfg();
+  const counts = [{ prompt: "say hello", expected: "greeter", hits: 9, n: 10 }];
+  const base = toBaseline(auditResult(counts, c));
+  base.manifest.environment = { runtimeVersion: "2.1.0", resolvedModel: "model-a", extraSkills: ["debug", "verify"], userConfig: false, maxTurns: 1 };
+  const cur = auditResult(counts, c);
+  cur.manifest.environment = { runtimeVersion: "2.2.0", resolvedModel: "model-b", extraSkills: ["debug", "run"], userConfig: true, maxTurns: 1 };
+  const m = compareToBaseline(cur, base).mismatches.join("\n");
+  assert.match(m, /different model: model-a → model-b/);
+  assert.match(m, /runtime version changed: 2\.1\.0 → 2\.2\.0/);
+  assert.match(m, /personal runtime config was loaded this run/);
+  assert.match(m, /\+run.*−verify/);
+  // older baselines without an environment block compare silently on these points
+  delete base.manifest.environment;
+  assert.equal(compareToBaseline(cur, base).mismatches.length, 0);
 });

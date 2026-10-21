@@ -5,6 +5,10 @@ import { resolve, dirname } from "node:path";
 import type { Config, EvalCase } from "./types.ts";
 
 const VALID_CONF = new Set([0.9, 0.95, 0.99]);
+const KNOWN_KEYS = new Set([
+  "runtime", "model", "cwd", "k", "threshold", "conf", "cases",
+  "maxTurns", "timeout", "userConfig", "failOnTheft",
+]);
 
 export class ConfigError extends Error {
   readonly errors: string[];
@@ -21,6 +25,14 @@ export class ConfigError extends Error {
 export function validateConfig(raw: unknown, configPath: string): Config {
   const r = (raw ?? {}) as Record<string, unknown>;
   const errs: string[] = [];
+
+  // a typo'd key ("treshold") would otherwise silently fall back to the default — fail loud.
+  // "$schema" and "_"-prefixed keys are allowed for tooling and comments.
+  for (const key of Object.keys(r)) {
+    if (!KNOWN_KEYS.has(key) && !key.startsWith("$") && !key.startsWith("_")) {
+      errs.push(`unknown config key "${key}" (known: ${[...KNOWN_KEYS].join(", ")})`);
+    }
+  }
 
   const runtime = typeof r["runtime"] === "string" && r["runtime"] ? (r["runtime"] as string) : "claude-code";
 
@@ -50,6 +62,21 @@ export function validateConfig(raw: unknown, configPath: string): Config {
     errs.push(`conf must be one of 0.9, 0.95, 0.99 (got ${JSON.stringify(r["conf"])})`);
   }
 
+  const maxTurns = r["maxTurns"];
+  if (maxTurns !== undefined && (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1)) {
+    errs.push(`maxTurns must be a positive integer (got ${JSON.stringify(maxTurns)})`);
+  }
+  // seconds in the file / on the CLI; ms internally
+  const timeout = r["timeout"];
+  if (timeout !== undefined && (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0)) {
+    errs.push(`timeout must be a positive number of seconds (got ${JSON.stringify(timeout)})`);
+  }
+  for (const key of ["userConfig", "failOnTheft"]) {
+    if (r[key] !== undefined && typeof r[key] !== "boolean") {
+      errs.push(`${key} must be true or false (got ${JSON.stringify(r[key])})`);
+    }
+  }
+
   const cases = Array.isArray(r["cases"]) ? (r["cases"] as unknown[]) : [];
   if (cases.length === 0) errs.push("config needs a non-empty `cases` array");
   cases.forEach((c, i) => {
@@ -71,6 +98,10 @@ export function validateConfig(raw: unknown, configPath: string): Config {
     threshold: threshold as number,
     conf: conf as number,
     cases: cases as EvalCase[],
+    ...(maxTurns !== undefined ? { maxTurns: maxTurns as number } : {}),
+    ...(timeout !== undefined ? { timeoutMs: Math.round((timeout as number) * 1000) } : {}),
+    ...(r["userConfig"] === true ? { userConfig: true } : {}),
+    ...(r["failOnTheft"] === true ? { failOnTheft: true } : {}),
   };
 }
 
@@ -101,6 +132,10 @@ export interface Overrides {
   k?: string | undefined;
   threshold?: string | undefined;
   conf?: string | undefined;
+  maxTurns?: string | undefined;
+  timeout?: string | undefined;
+  userConfig?: boolean | undefined;
+  failOnTheft?: boolean | undefined;
 }
 
 export function loadConfig(configPath: string, overrides: Overrides = {}): Config {
@@ -116,5 +151,9 @@ export function loadConfig(configPath: string, overrides: Overrides = {}): Confi
   if (overrides.k !== undefined) merged["k"] = Number(overrides.k);
   if (overrides.threshold !== undefined) merged["threshold"] = Number(overrides.threshold);
   if (overrides.conf !== undefined) merged["conf"] = Number(overrides.conf);
+  if (overrides.maxTurns !== undefined) merged["maxTurns"] = Number(overrides.maxTurns);
+  if (overrides.timeout !== undefined) merged["timeout"] = Number(overrides.timeout);
+  if (overrides.userConfig) merged["userConfig"] = true;
+  if (overrides.failOnTheft) merged["failOnTheft"] = true;
   return validateConfig(merged, configPath);
 }

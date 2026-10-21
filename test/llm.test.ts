@@ -43,3 +43,11 @@ test("llmBackend: API when ANTHROPIC_API_KEY is set, CLI (subscription) otherwis
     else process.env["ANTHROPIC_API_KEY"] = orig;
   }
 });
+
+test("claude CLI completions are hermetic and leave no session transcripts", async () => {
+  const { claudeCliArgs } = await import("../src/llm.ts");
+  const a = claudeCliArgs("sys", "user", { model: "m" });
+  for (const f of ["--no-session-persistence", "--strict-mcp-config"]) assert.ok(a.includes(f), f);
+  assert.equal(a[a.indexOf("--setting-sources") + 1], "project");
+  assert.equal(a[a.indexOf("--model") + 1], "m");
+});

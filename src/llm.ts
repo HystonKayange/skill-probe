@@ -3,8 +3,8 @@
  *   - otherwise              → fall back to the `claude` CLI (works on a Claude subscription,
  *                              no API key needed).
  * So the whole tool — audit, gen, fix — runs on just a logged-in `claude`. */
-import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
+import { runProcess } from "./proc.ts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 
@@ -60,23 +60,25 @@ export function interpretClaudeJson(
   return text ? { text } : { error: `claude CLI returned no text (${(err || out).slice(0, 200)})` };
 }
 
-function completeViaClaudeCli(system: string, user: string, opts: CompleteOpts): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const args = ["-p", user, "--append-system-prompt", system, "--output-format", "json"];
-    if (opts.model) args.push("--model", opts.model);
-    // run in a neutral cwd so the project's own skills/AGENTS.md don't bias the generation
-    const child = spawn("claude", args, { cwd: tmpdir(), stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "", settled = false, timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 120_000);
-    const done = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
-    child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => { err += d.toString(); });
-    child.on("error", (e: Error) => done(() =>
-      reject(new Error(`claude CLI failed: ${e.message} — set ANTHROPIC_API_KEY or install/login 'claude'.`))));
-    child.on("close", (code: number | null) => done(() => {
-      const r = interpretClaudeJson(code, out, err, timedOut);
-      if (r.text) resolve(r.text);
-      else reject(new Error(r.error ?? "claude CLI failed"));
-    }));
-  });
+/** CLI arguments for one completion. Exported for testing. */
+export function claudeCliArgs(system: string, user: string, opts: CompleteOpts): string[] {
+  // hermetic + no session transcript: diagnose calls this k times per case, and neither the user's
+  // plugins/MCP servers nor ~/.claude/projects clutter have any business in a plain completion
+  const args = [
+    "-p", user, "--append-system-prompt", system, "--output-format", "json",
+    "--no-session-persistence", "--setting-sources", "project", "--strict-mcp-config",
+  ];
+  if (opts.model) args.push("--model", opts.model);
+  return args;
+}
+
+async function completeViaClaudeCli(system: string, user: string, opts: CompleteOpts): Promise<string> {
+  // run in a neutral cwd so the project's own skills/AGENTS.md don't bias the generation
+  const r = await runProcess("claude", claudeCliArgs(system, user, opts), { cwd: tmpdir(), timeoutMs: 120_000 });
+  if (r.spawnError) {
+    throw new Error(`claude CLI failed: ${r.spawnError} — set ANTHROPIC_API_KEY or install/login 'claude'.`);
+  }
+  const out = interpretClaudeJson(r.code, r.stdout, r.stderr, r.timedOut);
+  if (out.text) return out.text;
+  throw new Error(out.error ?? "claude CLI failed");
 }

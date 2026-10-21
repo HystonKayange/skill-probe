@@ -1,12 +1,15 @@
 /** Human table + machine JSON rendering. Every number ships with its CI and k; infrastructure
  * errors are shown distinctly from behavioral results. */
-import { wilsonInterval } from "./stats.ts";
-import type { AuditResult, Verdict } from "./eval.ts";
+import { kToCertify } from "./stats.ts";
+import type { AuditResult, CaseResult, Verdict } from "./eval.ts";
 import type { FixResult } from "./fix.ts";
 import type { ContextAuditResult } from "./context.ts";
 import type { DoctorResult } from "./doctor.ts";
 import type { DiagnoseResult, DiagVerdict } from "./diagnose.ts";
 import type { BaselineComparison } from "./baseline.ts";
+import type { RunManifest } from "./manifest.ts";
+
+export { kToCertify };
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const pval = (p: number) => (p < 0.001 ? "<0.001" : p.toFixed(3));
@@ -15,20 +18,39 @@ const LABEL: Record<Verdict, string> = {
   inconclusive: "INCONCLUSIVE", error: "ERROR       ",
 };
 
-/** Smallest k at which an all-success run could certify reliability >= threshold. */
-export function kToCertify(threshold: number, conf: number): number {
-  for (let k = 1; k <= 500; k++) {
-    if (wilsonInterval(k, k, conf).lo > threshold) return k;
+export interface RenderOpts { showCost?: boolean }
+
+/** One line describing what the runtime actually ran with, when it told us. */
+function environmentLine(m: RunManifest | undefined): string | null {
+  const e = m?.environment;
+  if (!e) return null;
+  const bits: string[] = [];
+  if (e.runtimeVersion) bits.push(`runtime ${e.runtimeVersion}`);
+  if (e.resolvedModel && m!.model === "(runtime default)") bits.push(`model resolved to ${e.resolvedModel}`);
+  if (e.extraSkills) {
+    bits.push(e.extraSkills.length
+      ? `${e.extraSkills.length} skill(s) outside the library also loaded (${e.extraSkills.slice(0, 6).join(", ")}${e.extraSkills.length > 6 ? ", …" : ""})`
+      : "no skills outside the library loaded");
   }
-  return 500;
+  bits.push(e.userConfig ? "personal runtime config INCLUDED"
+    : e.hermetic ? "hermetic (personal runtime config excluded)"
+    : "personal runtime config NOT isolated (this runtime can't exclude it)");
+  return `  ${bits.join(" · ")}`;
 }
 
-export interface RenderOpts { showCost?: boolean }
+function theftLine(c: CaseResult): string {
+  const counts = c.theft.map((s) => `${s} ${c.stats.dist[s]}/${c.stats.n}`).join(", ");
+  return `        ⚠ trigger-theft by: ${counts}` +
+    (c.verdict === "pass" ? " (reliability still clears the bar; --fail-on-theft makes this fail)" : "");
+}
 
 export function renderTable(a: AuditResult, opts: RenderOpts = {}): string {
   const showCost = opts.showCost ?? true;
   const out: string[] = [];
   out.push(`skill-probe — runtime: ${a.runtime}  model: ${a.model}  threshold: ${pct(a.threshold)}`);
+  const env = environmentLine(a.manifest);
+  if (env) out.push(env);
+  for (const w of a.warnings ?? []) out.push(`  ⚠ ${w}`);
   out.push("");
   for (const c of a.cases) {
     const r = c.reliability;
@@ -44,10 +66,15 @@ export function renderTable(a: AuditResult, opts: RenderOpts = {}): string {
     const dist = Object.entries(c.stats.dist)
       .sort((p, q) => q[1] - p[1]).map(([s, n]) => `${s}×${n}`).join(", ");
     out.push(`        outcomes: ${dist}`);
-    if (c.theft.length) out.push(`        ⚠ trigger-theft by: ${c.theft.join(", ")}`);
+    if (c.notLoaded) out.push(`        ⛔ the runtime never loaded "${c.expected}" — it cannot fire (check its SKILL.md)`);
+    if (c.theft.length) out.push(theftLine(c));
+    if (c.expected !== null && c.stats.preempted > 0 && c.verdict !== "pass") {
+      out.push(`        ⓘ ${c.stats.preempted}/${c.stats.n} probes called another tool first and loaded no skill — ` +
+        `activation may be under-counted (try --max-turns 2)`);
+    }
     if (c.verdict === "inconclusive") {
-      out.push(`        ↳ CI straddles threshold — need ~k=${kToCertify(a.threshold, r.conf)} ` +
-        `all-success runs to certify ≥${pct(a.threshold)} (currently k=${r.k})`);
+      out.push(`        ↳ not statistically decided at k=${r.k} — certifying ≥${pct(a.threshold)} needs ` +
+        `k≥${kToCertify(a.threshold, r.conf)} with every run firing (more if some miss)`);
     }
   }
   out.push("");
@@ -66,6 +93,9 @@ export function renderMarkdown(a: AuditResult, opts: RenderOpts = {}): string {
   const out: string[] = [];
   const conf = a.cases[0]?.reliability.conf ?? 0.95;
   out.push(`### skill-probe — \`${a.runtime}\` · model \`${a.model}\` · threshold ${pct(a.threshold)}`);
+  const env = environmentLine(a.manifest);
+  if (env) out.push("", `_${env.trim()}_`);
+  for (const w of a.warnings ?? []) out.push("", `> ⚠ ${w}`);
   out.push("");
   out.push(`| Verdict | Skill | Reliability (${pct(conf)} CI) | k | Notes |`);
   out.push("|---|---|---|---|---|");
@@ -74,8 +104,9 @@ export function renderMarkdown(a: AuditResult, opts: RenderOpts = {}): string {
     const expect = c.expected ?? "(decoy)";
     let notes = "";
     if (c.verdict === "error") notes = `infra error: ${c.stats.lastError ?? "untrustworthy"}`;
-    else if (c.theft.length) notes = `⚠ trigger-theft by ${c.theft.join(", ")}`;
-    else if (c.verdict === "inconclusive") notes = `need ~k=${kToCertify(a.threshold, r.conf)} to certify`;
+    else if (c.notLoaded) notes = `⛔ runtime never loaded \`${c.expected}\``;
+    else if (c.theft.length) notes = `⚠ trigger-theft by ${c.theft.map((s) => `${s} ${c.stats.dist[s]}/${c.stats.n}`).join(", ")}`;
+    else if (c.verdict === "inconclusive") notes = `need k≥${kToCertify(a.threshold, r.conf)} to certify`;
     const rel = c.verdict === "error" ? "—" : `${pct(r.pHat)} [${pct(r.ciLow)}, ${pct(r.ciHigh)}]`;
     out.push(`| ${mark[c.verdict]} | \`${expect}\` | ${rel} | ${r.k} | ${notes} |`);
   }
@@ -99,6 +130,9 @@ export function renderDiagnose(d: DiagnoseResult, opts: RenderOpts = {}): string
   const out: string[] = [];
   out.push(`skill-probe diagnose — runtime: ${d.runtime}  model: ${d.model}  threshold: ${pct(d.threshold)}`);
   out.push(`  actual = real activation · intended = forced-choice routing (does the model even pick it?)`);
+  const env = environmentLine(d.manifest);
+  if (env) out.push(env);
+  for (const w of d.warnings ?? []) out.push(`  ⚠ ${w}`);
   out.push("");
   const dist = (m: Record<string, number>) =>
     Object.entries(m).sort((p, q) => q[1] - p[1]).map(([s, n]) => `${s}×${n}`).join(", ") || "(none)";
@@ -141,6 +175,10 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
   out.push(`skill-probe context — runtime: ${a.runtime}  model: ${a.model}  ` +
     `threshold: ${pct(a.threshold)}  library: ${a.librarySize} skills`);
   out.push(`  isolation = only that skill loaded · co-loaded = the full library (${a.librarySize}) loaded`);
+  out.push(`  every condition runs in an identical sandbox (skills + project CLAUDE.md/AGENTS.md) — only the skill set differs`);
+  const env = environmentLine(a.manifest);
+  if (env) out.push(env);
+  for (const w of a.warnings ?? []) out.push(`  ⚠ ${w}`);
   const familyN = a.cases.filter((c) => !c.untrustworthy).length;
   if (familyN > 1) {
     out.push(`  ${familyN} comparisons — interference decided on Benjamini-Hochberg adjusted p<0.05` +
@@ -152,6 +190,11 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
   for (const c of a.cases) {
     if (c.untrustworthy) {
       out.push(`  [⛔ ERROR]  ${c.expected}  | ${c.prompt}`);
+      if (c.loadIssue) {
+        out.push(`        the runtime loaded the wrong skill set — comparison NOT trustworthy`);
+        out.push(`        ${c.loadIssue}`);
+        continue;
+      }
       out.push(`        infrastructure errors dominated — comparison NOT trustworthy ` +
         `(isolation ${c.isolation.stats.errors} err/${c.isolation.stats.n} valid, ` +
         `co-loaded ${c.coLoaded.stats.errors} err/${c.coLoaded.stats.n} valid)`);
@@ -166,19 +209,24 @@ export function renderContext(a: ContextAuditResult, opts: RenderOpts = {}): str
     out.push(`        Δ ${c.deltaP >= 0 ? "+" : ""}${pct(c.deltaP)} under load   Fisher p=${pval(c.fisherP)}` +
       (familyN > 1 ? ` · BH-adj p=${pval(c.fisherPAdj)}` : ""));
     if (c.interference) {
+      const external = new Set(c.externalThieves ?? []);
       const thieves = Object.keys(c.coLoaded.stats.dist)
-        .filter((s) => s !== c.expected && s !== "None");
+        .filter((s) => s !== c.expected && s !== "None")
+        .map((s) => (external.has(s) ? `${s} (outside the library)` : s));
       out.push(`        ↳ fires reliably alone but is suppressed when the library is co-loaded` +
         (thieves.length ? ` (stolen by: ${thieves.join(", ")})` : ""));
       if (c.ablation) {
-        if (c.ablation.length === 0) {
+        if (c.ablation.length === 0 && external.size) {
+          out.push(`        leave-one-out: only skills outside the library stole these probes ` +
+            `(${[...external].join(", ")}) — they can't be removed; narrow or rename "${c.expected}" to stop colliding`);
+        } else if (c.ablation.length === 0) {
           out.push(`        leave-one-out: no sibling stole these probes (suppressed to None) — ` +
             `dilution, not theft; nothing to ablate`);
         } else {
           out.push(`        leave-one-out (each suspect removed, recovery vs co-loaded):`);
           for (const abl of c.ablation) {
             if (abl.untrustworthy) {
-              out.push(`          − ${abl.removed}: infra errors dominated — run not trustworthy`);
+              out.push(`          − ${abl.removed}: ${abl.loadIssue ?? "infra errors dominated"} — run not trustworthy`);
               continue;
             }
             const tag = abl.culprit
@@ -248,18 +296,23 @@ export function renderFix(f: FixResult): string {
   out.push(`  old: ${f.oldDesc}`);
   out.push(`  new: ${f.newDesc}`);
   out.push("");
-  out.push(`  before: ${pct(f.before.pHat)} [${pct(f.before.ciLow)}, ${pct(f.before.ciHigh)}]  ` +
-    `after: ${pct(f.after.pHat)} [${pct(f.after.ciLow)}, ${pct(f.after.ciHigh)}]  ` +
-    `(${f.n} paired runs${f.errors ? `, ${f.errors} dropped to infra errors` : ""})`);
-  out.push(`  P(rewrite improved reliability) = ${pct(f.pImprove)}   ` +
-    `Δ = ${f.deltaMean >= 0 ? "+" : ""}${pct(f.deltaMean)} [${pct(f.deltaCi[0])}, ${pct(f.deltaCi[1])}]`);
-  out.push("");
-  if (f.applied) {
+  if (f.n > 0 || f.errors > 0) {
+    out.push(`  before: ${pct(f.before.pHat)} [${pct(f.before.ciLow)}, ${pct(f.before.ciHigh)}]  ` +
+      `after: ${pct(f.after.pHat)} [${pct(f.after.ciLow)}, ${pct(f.after.ciHigh)}]  ` +
+      `(${f.n} paired runs${f.errors ? `, ${f.errors} dropped to infra errors` : ""})` +
+      (f.totalCost ? `  cost $${f.totalCost.toFixed(4)}` : ""));
+    out.push(`  P(rewrite improved reliability) = ${pct(f.pImprove)}   ` +
+      `Δ = ${f.deltaMean >= 0 ? "+" : ""}${pct(f.deltaMean)} [${pct(f.deltaCi[0])}, ${pct(f.deltaCi[1])}]`);
+    out.push("");
+  }
+  if (f.note) {
+    out.push(`  ↩ NOT APPLIED — ${f.note}. Description unchanged.`);
+  } else if (f.applied) {
     out.push(`  ✅ APPLIED — P(improvement) ${pct(f.pImprove)} ≥ bar ${pct(f.applyBar)} and Δ>0.`);
     out.push(`     original backed up to: ${f.backupPath}`);
   } else {
-    out.push(`  ↩ REVERTED — not enough evidence the rewrite helps ` +
-      `(need P(improvement) ≥ ${pct(f.applyBar)} and Δ>0). Description unchanged, no backup kept.`);
+    out.push(`  ↩ NOT APPLIED — not enough evidence the rewrite helps ` +
+      `(need P(improvement) ≥ ${pct(f.applyBar)} and Δ>0). Description unchanged.`);
   }
   return out.join("\n");
 }
