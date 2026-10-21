@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 — 2026-10-21
 
 Correctness hardening: several measurements could come out confidently wrong. Each item below was
 found by measurement, and each has a regression test.
